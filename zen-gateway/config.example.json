@@ -1,0 +1,25 @@
+{
+  "listen": "127.0.0.1:7864",
+  "api_keys": ["REPLACE-ME"],
+  "wb2api": { "base": "http://127.0.0.1:7863", "api_key": "REPLACE-ME", "models_ttl_ms": 600000 },
+  "zen": {
+    "base": "https://opencode.ai/zen",
+    "catalog_ttl_ms": 600000,
+    "metadata_ttl_ms": 86400000,
+    "metadata_cache": "/var/lib/zen-gateway/models.dev.json"
+  },
+  "limits": {
+    "first_byte_ms": 30000,
+    "body_idle_ms": 120000,
+    "responses_body_idle_ms": 300000,
+    "max_in_flight_per_model": 3,
+    "max_in_flight_global": 8,
+    "upstream_timeout_ms": 120000,
+    "pre_content_retries": 1
+  },
+  "logging": {
+    "request_log": "/var/lib/zen-gateway/requests-%Y-%m-%d.jsonl",
+    "log_prompts": false,
+    "retention_days": 7
+  }
+}

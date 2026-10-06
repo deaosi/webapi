@@ -644,6 +644,30 @@ http://127.0.0.1:7863/panel/
 
 出站请求统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA（可被 `upstream.user_agent` 覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。领奖请求额外带 `x-client-platform: web` 与 workbuddy.cn 的 Origin/Referer。
 
+## 🧩 附带工具：zen-gateway（OpenCode Zen 免费模型旁路网关）
+
+`zen-gateway/` 是一个**独立的 Node 旁路网关**：不参与本项目的 Go 构建，也不改动
+`wb2api` 的任何代码、配置或数据。它在面板前面加一层 OpenAI 兼容门面，让客户端
+**用同一个地址、同一把 key** 同时调用面板模型和 OpenCode Zen 的免费模型。
+
+- `zen:*` → OpenCode Zen 匿名免费通道（CLI 身份伪装、会话 ID 规范化、`bash`/`read`
+  门禁桩工具、`muse-spark` 的 chat↔responses 翻译、`jev` 的 `/v1/systemone` 透传）；
+- 其他模型名（`cn:*`、`global:*`、裸名）→ **字节级原样透传**给面板
+  `127.0.0.1:7863`，面板的选号、冷却、会话粘性、计费语义完全不变；
+- `GET /v1/models` 返回两边合并后的目录。
+
+部署形态：独立 systemd 服务（默认 `127.0.0.1:7864`），Caddy 在面板站点块内加
+`handle_path /zen/*` 分发；回滚 = 停服务 + 删这几行，面板无感。
+
+详见 [`zen-gateway/README.md`](zen-gateway/README.md) 与
+[`zen-gateway/README.md`](zen-gateway/README.md)。测试：
+`cd zen-gateway && npm test`（56 项，全部离线运行，无需网络）。
+
+> ⚠️ 数据条款提醒：Zen 免费模型各有各的条款——部分模型在免费期会用你的数据改进模型，
+> NVIDIA 试用端点明确要求**勿提交机密数据**，`muse-spark-*-contributor-free` 会用
+> prompt 训练 Meta 模型；`space-bunny-free` / `longcat-2.5-preview-free` 声明零保留。
+> 选用前请阅读 `zen-gateway/README.md` 的 “Data-handling caveat” 一节。
+
 ## 请求级日志
 
 每个 `/v1/chat/completions` 请求结束时输出一行表格日志（stdout）：

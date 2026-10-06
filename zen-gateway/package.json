@@ -1,0 +1,12 @@
+{
+  "name": "zen-gateway",
+  "version": "0.1.0",
+  "description": "Unified OpenAI-compatible facade: existing wb2api panel models + OpenCode Zen free-lane models behind one base URL and one key.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.mjs --config /etc/zen-gateway/config.json",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "license": "MIT"
+}

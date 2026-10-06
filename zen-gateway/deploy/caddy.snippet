@@ -1,0 +1,20 @@
+# Add inside the existing `wb2api.fanwulink.cn { ... }` block, BEFORE the
+# catch-all `reverse_proxy 127.0.0.1:7863`.
+#
+# handle_path strips the /zen prefix, so the gateway receives /v1/... exactly
+# as an OpenAI client would send it. The gateway also tolerates the unstripped
+# form, so switching to a dedicated subdomain later needs no code change.
+
+	handle_path /zen/* {
+		reverse_proxy 127.0.0.1:7864 {
+			flush_interval -1
+		}
+	}
+
+# Apply with:
+#   sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-$(date +%Y%m%d-%H%M%S)
+#   sudo caddy validate --config /etc/caddy/Caddyfile
+#   sudo caddy fmt --overwrite /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# Rollback: restore the backup (or delete these lines) and reload again.

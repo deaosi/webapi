@@ -1,0 +1,35 @@
+[Unit]
+Description=Zen gateway (wb2api panel + OpenCode Zen free lane behind one API)
+After=network-online.target wb2api.service
+Wants=network-online.target
+ConditionPathExists=/opt/zen-gateway/current/src/server.mjs
+
+[Service]
+Type=simple
+User=zen-gateway
+Group=zen-gateway
+WorkingDirectory=/opt/zen-gateway/current
+Environment=TZ=Asia/Shanghai
+Environment=NODE_ENV=production
+ExecStart=/opt/skilldesk-platform/runtime/node/bin/node src/server.mjs --config /etc/zen-gateway/config.json
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+# Hardening: read-only root, no privilege escalation, only its own dirs writable.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/zen-gateway
+CapabilityBoundingSet=
+LimitNOFILE=65536
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

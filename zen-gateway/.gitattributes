@@ -1,0 +1,3 @@
+# Node project with a POSIX shell installer: keep LF everywhere.
+* text=auto eol=lf
+*.sh text eol=lf
