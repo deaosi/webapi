@@ -25,7 +25,12 @@ func (p *Panel) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 	if !p.apiKeysAvailable(w) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": p.cfg.APIKeys.List()})
+	// keys 保持 5 字段元数据契约不变；调用统计并行挂在 usage（id → 统计）下。
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"keys":  p.cfg.APIKeys.List(),
+		"usage": p.cfg.APIKeys.UsageMap(),
+	})
 }
 
 func (p *Panel) createAPIKey(w http.ResponseWriter, r *http.Request) {

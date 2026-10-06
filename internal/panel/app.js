@@ -7,7 +7,7 @@ let overviewData = null, cfgLoaded = null;
 let logPin = true, loginState = null, loginTimer = null;
 let refTimer = null;
 const apiKeyState = {
-  rows: [], page: 1, loaded: false, loading: false, error: '', busyID: '',
+  rows: [], usage: {}, page: 1, loaded: false, loading: false, error: '', busyID: '',
   mode: 'create', editID: '', secret: '', saving: false, modalOpen: false, opener: null
 };
 
@@ -207,6 +207,18 @@ function apiKeyMetadata(key) {
     enabled: key.enabled === true, created_at: String(key.created_at || '')
   };
 }
+// 调用统计来自列表接口的 usage 映射（key.id → 统计对象）；没有记录即视为零，
+// 老服务端不返回 usage 时本页也只是显示「未使用」，不会报错。
+function apiKeyUsage(usage, id) {
+  const u = (usage && usage[id]) || {};
+  return {
+    requests: Number(u.requests || 0),
+    errors: Number(u.errors || 0),
+    tokens: Number(u.prompt_tokens || 0) + Number(u.output_tokens || 0),
+    last_used_at: String(u.last_used_at || ''),
+    last_model: String(u.last_model || '')
+  };
+}
 function renderAPIEndpoints() {
   const urls = apiEndpoints(location.origin);
   $('akBaseURL').value = urls.base;
@@ -228,11 +240,11 @@ function renderAPIKeys() {
   $('akNext').disabled = s.page === pages || !!s.busyID || s.saving;
   $('akPageNote').textContent = '第 ' + s.page + ' / ' + pages + ' 页 · 共 ' + total + ' 个 · 每页 10 个';
   if (s.loading) {
-    $('akBody').innerHTML = '<tr><td colspan="5"><div class="empty">正在加载调用密钥…</div></td></tr>';
+    $('akBody').innerHTML = '<tr><td colspan="7"><div class="empty">正在加载调用密钥…</div></td></tr>';
     return;
   }
   if (!total) {
-    $('akBody').innerHTML = '<tr><td colspan="5"><div class="empty"><div class="big">' +
+    $('akBody').innerHTML = '<tr><td colspan="7"><div class="empty"><div class="big">' +
       (s.error ? '调用密钥加载失败' : '还没有调用密钥') + '</div>' +
       (s.error ? '点击「刷新」重试' : '点击「创建密钥」，为应用生成独立调用密钥') + '</div></td></tr>';
     return;
@@ -241,10 +253,20 @@ function renderAPIKeys() {
     const busy = s.busyID === key.id;
     const disabled = s.busyID || s.saving ? ' disabled' : '';
     const created = parseAPITime(key.created_at);
+    const used = apiKeyUsage(s.usage, key.id);
+    const lastUsed = parseAPITime(used.last_used_at);
+    const usageCell = used.requests
+      ? '<span class="tag ok">' + used.requests + ' 次</span>' +
+        (used.errors ? ' <span class="tag bad">失败 ' + used.errors + '</span>' : '') +
+        (used.tokens ? ' <span class="tag mute">' + esc(fmtTok(used.tokens)) + ' tok</span>' : '')
+      : (lastUsed ? '<span class="tag mute">仅查询过模型</span>' : '<span class="tag mute">未使用</span>');
     const attrs = ' data-id="' + esc(key.id) + '"' + disabled;
     return '<tr><td class="who"><div class="nm">' + esc(key.name || '未命名') + '</div></td>' +
       '<td class="ak-prefix">' + esc(key.prefix ? key.prefix + '••••' : '—') + '</td>' +
       '<td><span class="tag ' + (key.enabled ? 'ok' : 'mute') + '">' + (key.enabled ? '已启用' : '已停用') + '</span></td>' +
+      '<td>' + usageCell + '</td>' +
+      '<td>' + (lastUsed ? esc(fmtLocalDateTime(lastUsed)) +
+        (used.last_model ? ' <span class="tag mute">' + esc(used.last_model) + '</span>' : '') : '—') + '</td>' +
       '<td>' + esc(created ? fmtLocalDateTime(created) : '—') + '</td>' +
       '<td><div class="acts"><button type="button" data-act="ak-rename"' + attrs + '>改名</button>' +
       '<button type="button" data-act="ak-toggle"' + attrs + '>' + (busy ? '处理中…' : (key.enabled ? '停用' : '启用')) + '</button>' +
@@ -261,6 +283,7 @@ async function loadAPIKeys() {
     const data = await api('api_keys');
     if (!Array.isArray(data.keys)) throw new Error('服务返回的密钥列表格式不正确');
     s.rows = data.keys.map(apiKeyMetadata); s.loaded = true;
+    s.usage = (data.usage && typeof data.usage === 'object') ? data.usage : {};
   } catch (e) { s.error = '读取失败：' + e.message; }
   finally { s.loading = false; renderAPIKeys(); }
 }
@@ -362,6 +385,7 @@ async function deleteAPIKey(id) {
   try {
     await api('api_keys/' + encodeURIComponent(id), { method: 'DELETE' });
     s.rows = s.rows.filter(row => row.id !== id);
+    delete s.usage[id];
     toast('密钥已删除', 'ok');
   } catch (e) { s.error = '删除失败：' + e.message; toast(s.error, 'err'); }
   finally { s.busyID = ''; renderAPIKeys(); }

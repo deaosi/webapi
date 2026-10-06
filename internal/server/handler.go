@@ -170,15 +170,35 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // withAPIAuth accepts the current primary key and enabled managed keys. Admin
 // endpoints keep withAuth so a client key cannot read or change gateway settings.
+//
+// 命中调用密钥时把密钥 ID 放进请求上下文：/v1 处理链据此按密钥累加调用统计
+// （面板「API 密钥」页的用量与最近调用时间）。主密钥没有 ID，不参与统计。
 func (h *Handler) withAPIAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		primaryOK := httpauth.VerifyBearer(r, h.loadLive().APIKey)
-		if !primaryOK && (h.cfg.APIKeys == nil || !h.cfg.APIKeys.VerifyBearer(r)) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+		if httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+			next(w, r)
 			return
 		}
-		next(w, r)
+		if h.cfg.APIKeys != nil {
+			if id, ok := h.cfg.APIKeys.MatchBearer(r); ok {
+				next(w, r.WithContext(context.WithValue(r.Context(), clientKeyIDKey{}, id)))
+				return
+			}
+		}
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 	}
+}
+
+// clientKeyIDKey 是请求上下文键：本次请求由哪个调用密钥授权（主密钥 / 未鉴权时为空）。
+type clientKeyIDKey struct{}
+
+// clientKeyID 取出本次请求命中的调用密钥 ID（无则空串）。
+func clientKeyID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	id, _ := r.Context().Value(clientKeyIDKey{}).(string)
+	return id
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +292,10 @@ const (
 // models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	// 调用密钥探测模型列表：只刷新「最近调用」，不计入调用次数（没有 token 消耗）。
+	if id := clientKeyID(r); id != "" && h.cfg.APIKeys != nil {
+		h.cfg.APIKeys.TouchUsage(id, "")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
 		"data":   h.modelList(),
@@ -505,6 +529,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
+	// 本次请求命中的调用密钥（主密钥 / 未鉴权为空）：用量与最近调用时间按密钥记账。
+	keyID := clientKeyID(r)
 	// 请求体无大小上限（max_body_mb 已移除，对齐上游）：完整读入，超限类问题交由
 	// 上游自然返回错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断
 	// 防御语义保留在读错误路径——移除预拦截后，截断只可能来自客户端自己断流，
@@ -645,6 +671,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				TokensPerSecond:  delta.TokensPerSecond,
 				HasTPS:           delta.HasTokensPerSecond,
 			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
+		}
+
+		// 按调用密钥累加调用统计（面板「API 密钥」页）：与用量视图同口径——按尝试
+		// 计数、失败也计入（重试放大可见），token 只取本次尝试真的带回来的值。
+		// 主密钥（keyID 为空）与未挂载密钥存储时不记。
+		if keyID != "" && h.cfg.APIKeys != nil {
+			var promptTokens, outputTokens int64
+			if delta.HasPromptTokens {
+				promptTokens = delta.PromptTokens
+			}
+			if delta.HasCompletionTokens {
+				outputTokens = delta.CompletionTokens
+			}
+			h.cfg.APIKeys.RecordUsage(keyID, delta.Model, promptTokens, outputTokens,
+				delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
 		}
 	}
 

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -41,9 +42,23 @@ type Key struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Usage 是单个调用密钥的调用统计，供面板「API 密钥」页展示。
+//
+// 与 Key 分成两层而不是塞进 Key：Key 的字段集合是面板元数据契约（恰好 5 个字段，
+// 前端与测试都按此校验），调用统计是只增不改的观测数据，独立一层就不必动既有契约。
+type Usage struct {
+	Requests     int64      `json:"requests"`                // 聊天调用尝试次数（失败也计入，重试放大可见）
+	Errors       int64      `json:"errors,omitempty"`        // 未取到上游 usage 的尝试次数（传输错误 / >=400 / 解析失败）
+	PromptTokens int64      `json:"prompt_tokens,omitempty"` // 累计输入 token
+	OutputTokens int64      `json:"output_tokens,omitempty"` // 累计输出 token
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`  // 最近一次调用时刻（含 /v1/models 这类无 token 调用）
+	LastModel    string     `json:"last_model,omitempty"`    // 最近一次调用使用的模型
+}
+
 type storedKey struct {
 	Key
 	SHA256 string `json:"sha256"`
+	Usage  Usage  `json:"usage"`
 }
 
 type diskStore struct {
@@ -204,31 +219,134 @@ func (s *Store) Delete(id string) error {
 	return ErrNotFound
 }
 
-// VerifyBearer checks an active client key. An empty store never grants access.
-func (s *Store) VerifyBearer(r *http.Request) bool {
+// MatchBearer 校验一个启用的调用密钥，并返回命中的密钥 ID。
+//
+// 校验语义与旧的布尔判定完全一致：遍历全部密钥做常量时间比较、不做提前返回，
+// 禁用的密钥不参与匹配；命中 ID 只在唯一匹配且启用时给出（空库恒不授权）。
+func (s *Store) MatchBearer(r *http.Request) (string, bool) {
 	if s == nil || r == nil {
-		return false
+		return "", false
 	}
 	authorization := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authorization, "Bearer "+secretPrefix) {
-		return false
+		return "", false
 	}
 	token := strings.TrimPrefix(authorization, "Bearer ")
 	if len(token) != len(secretPrefix)+43 {
-		return false
+		return "", false
 	}
 	digest := sha256.Sum256([]byte(token))
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	matched := 0
+	matchedID := ""
 	for _, key := range s.keys {
 		expected, _ := hex.DecodeString(key.SHA256)
 		match := subtle.ConstantTimeCompare(digest[:], expected)
 		if key.Enabled {
 			matched |= match
+			if match == 1 {
+				matchedID = key.ID
+			}
 		}
 	}
-	return matched == 1
+	if matched != 1 {
+		return "", false
+	}
+	return matchedID, true
+}
+
+// VerifyBearer 只做布尔判定（既有调用方语义不变）。An empty store never grants access.
+func (s *Store) VerifyBearer(r *http.Request) bool {
+	_, ok := s.MatchBearer(r)
+	return ok
+}
+
+// RecordUsage 累加一次聊天调用尝试的统计（成功与失败都计入，与用量视图同口径）。
+//
+// 落盘策略：随密钥存储文件同步原子写。单文件只有几 KB、面板用途下请求频率低，
+// 换来的是「重启不丢计数、最近调用时间即刻准确」，无需额外 goroutine 或定时器。
+// 落盘失败只记日志、不回滚内存计数（统计不影响鉴权，宁可少写一次盘也不能卡请求）。
+func (s *Store) RecordUsage(id, model string, promptTokens, outputTokens int64, ok bool) {
+	if s == nil || id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.keys {
+		if s.keys[i].ID != id {
+			continue
+		}
+		next := append([]storedKey{}, s.keys...)
+		used := next[i].Usage
+		used.Requests++
+		if !ok {
+			used.Errors++
+		}
+		if promptTokens > 0 {
+			used.PromptTokens += promptTokens
+		}
+		if outputTokens > 0 {
+			used.OutputTokens += outputTokens
+		}
+		now := time.Now().UTC()
+		used.LastUsedAt = &now
+		if model != "" {
+			used.LastModel = model
+		}
+		next[i].Usage = used
+		if err := s.save(next); err != nil {
+			log.Printf("apikeys: 调用统计落盘失败 id=%s: %v", id, err)
+		}
+		s.keys = next
+		return
+	}
+}
+
+// TouchUsage 只刷新「最近调用」时刻与模型，不增加调用次数。
+// 用于 /v1/models 这类不产生 token 的调用：它在界面上确实是"最近用过这个密钥"，
+// 但不该把调用次数抬上去。
+func (s *Store) TouchUsage(id, model string) {
+	if s == nil || id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.keys {
+		if s.keys[i].ID != id {
+			continue
+		}
+		next := append([]storedKey{}, s.keys...)
+		now := time.Now().UTC()
+		next[i].Usage.LastUsedAt = &now
+		if model != "" {
+			next[i].Usage.LastModel = model
+		}
+		if err := s.save(next); err != nil {
+			log.Printf("apikeys: 调用时间落盘失败 id=%s: %v", id, err)
+		}
+		s.keys = next
+		return
+	}
+}
+
+// UsageMap 返回 id → 调用统计的快照（面板列表接口用；调用方拿到的是副本）。
+func (s *Store) UsageMap() map[string]Usage {
+	if s == nil {
+		return map[string]Usage{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	usage := make(map[string]Usage, len(s.keys))
+	for _, key := range s.keys {
+		entry := key.Usage
+		if key.Usage.LastUsedAt != nil {
+			at := *key.Usage.LastUsedAt
+			entry.LastUsedAt = &at
+		}
+		usage[key.ID] = entry
+	}
+	return usage
 }
 
 func validName(name string) (string, error) {

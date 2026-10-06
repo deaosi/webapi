@@ -148,6 +148,64 @@ func TestWriteFailureRollsBackAllMutations(t *testing.T) {
 	}
 }
 
+func TestUsageRecordingAndPersistence(t *testing.T) {
+	store, path := testStore(t)
+	key, secret, err := store.Create("client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage := store.UsageMap(); len(usage) != 1 || usage[key.ID].Requests != 0 || usage[key.ID].LastUsedAt != nil {
+		t.Fatalf("new key must start with empty usage: %#v", usage)
+	}
+	// 未知 ID / 空 ID 不得凭空建条目（防止面板出现幽灵密钥统计）。
+	store.RecordUsage("missing", "glm-5.2", 10, 20, true)
+	store.RecordUsage("", "glm-5.2", 10, 20, true)
+	store.TouchUsage("missing", "glm-5.2")
+	if usage := store.UsageMap(); len(usage) != 1 {
+		t.Fatalf("unknown ids must not create usage entries: %#v", usage)
+	}
+	store.RecordUsage(key.ID, "glm-5.2", 120, 30, true)
+	store.RecordUsage(key.ID, "glm-5.2", 0, 0, false)
+	store.TouchUsage(key.ID, "")
+	used := store.UsageMap()[key.ID]
+	if used.Requests != 2 || used.Errors != 1 || used.PromptTokens != 120 || used.OutputTokens != 30 {
+		t.Fatalf("usage counters wrong: %#v", used)
+	}
+	if used.LastUsedAt == nil || used.LastModel != "glm-5.2" {
+		t.Fatalf("last-used metadata wrong: %#v", used)
+	}
+	// UsageMap 必须返回副本：改动快照不得影响存储。
+	entry := store.UsageMap()[key.ID]
+	entry.Requests = 99
+	if store.UsageMap()[key.ID].Requests != 2 {
+		t.Fatal("UsageMap must return an isolated snapshot")
+	}
+	reloaded, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, ok := reloaded.UsageMap()[key.ID]
+	if !ok || persisted.Requests != used.Requests || persisted.Errors != used.Errors ||
+		persisted.PromptTokens != used.PromptTokens || persisted.OutputTokens != used.OutputTokens ||
+		persisted.LastModel != used.LastModel || persisted.LastUsedAt == nil ||
+		!persisted.LastUsedAt.Equal(*used.LastUsedAt) {
+		t.Fatalf("usage did not survive reload: got %#v want %#v", persisted, used)
+	}
+	// 统计层不得动元数据契约（面板列表仍按 5 字段校验），密钥本身照常可用。
+	if keys := reloaded.List(); len(keys) != 1 || keys[0].Name != "client" || keys[0].ID != key.ID {
+		t.Fatalf("metadata changed by usage recording: %#v", keys)
+	}
+	if !verifyToken(reloaded, secret) {
+		t.Fatal("usage recording broke key verification")
+	}
+	if err := store.Delete(key.ID); err != nil {
+		t.Fatal(err)
+	}
+	if usage := store.UsageMap(); len(usage) != 0 {
+		t.Fatalf("deleted key left usage behind: %#v", usage)
+	}
+}
+
 func TestNameValidationCountsRunes(t *testing.T) {
 	store, _ := testStore(t)
 	invalid := []string{"", "   ", "name\n", "\tname", "a\x00b", strings.Repeat("中", 81), string([]byte{0xff})}

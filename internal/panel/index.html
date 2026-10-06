@@ -759,12 +759,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button type="button" class="xs" id="akReload" data-act="ak-refresh">刷新</button>
           <button type="button" class="xs primary" id="akCreate" data-act="ak-create">创建密钥</button>
         </header>
-        <div class="pad"><p class="ak-note">管理密钥在配置页设置；此处创建的是调用密钥。完整调用密钥仅在创建成功时显示一次。</p></div>
+        <div class="pad"><p class="ak-note">管理密钥在配置页设置；此处创建的是调用密钥。完整调用密钥仅在创建成功时显示一次。</p>
+          <p class="ak-note">「调用」统计该密钥发起过的聊天请求次数（含失败重试），「最近调用」为最近一次使用时间（含模型列表查询）。</p></div>
         <div class="ak-error" id="akError" role="status" hidden></div>
         <div class="tbl-wrap">
           <table class="acc">
-            <thead><tr><th>名称</th><th>密钥前缀</th><th>状态</th><th>创建时间</th><th class="c-acts">操作</th></tr></thead>
-            <tbody id="akBody"><tr><td colspan="5"><div class="empty">正在加载调用密钥…</div></td></tr></tbody>
+            <thead><tr><th>名称</th><th>密钥前缀</th><th>状态</th><th>用量</th><th>最近调用</th><th>创建时间</th><th class="c-acts">操作</th></tr></thead>
+            <tbody id="akBody"><tr><td colspan="7"><div class="empty">正在加载调用密钥…</div></td></tr></tbody>
           </table>
         </div>
         <div class="ak-page" id="akPager" hidden><span class="note" id="akPageNote"></span>

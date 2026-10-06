@@ -451,6 +451,21 @@ run('api = mockAPI');
   assert.strictEqual(run('apiKeyState.secret'), '');
   assert.strictEqual(get('akSecret').value, '');
   assert.strictEqual(run('apiKeyState.modalOpen'), false);
+  const listedKey = { id: 'key-1', name: 'Client <one>', prefix: 'sk-wb2a-abcd1234', enabled: true,
+    created_at: '2026-09-30T10:00:00Z' };
+  response = { keys: [listedKey], usage: {} };
+  await run('loadAPIKeys()');
+  assert(get('akBody').innerHTML.includes('未使用'));
+  response = { keys: [listedKey], usage: { 'key-1': { requests: 12, errors: 2, prompt_tokens: 3000,
+    output_tokens: 1500, last_used_at: '2026-10-06T03:00:00Z', last_model: 'deepseek-v4.1-flash' } } };
+  await run('loadAPIKeys()');
+  const keyHTML = get('akBody').innerHTML;
+  assert(keyHTML.includes('12 次'));
+  assert(keyHTML.includes('失败 2'));
+  assert(keyHTML.includes('4.5k tok'));
+  assert(keyHTML.includes('deepseek-v4.1-flash'));
+  assert.strictEqual(run("apiKeyState.usage['key-1'].requests"), 12);
+  assert.strictEqual(run("apiKeyUsage({}, 'key-1').requests"), 0);
   run("openAPIKeyModal('rename', 'key-1'); $('akName').value = 'Renamed'");
   response = { key: { id: 'key-1', name: 'Renamed', prefix: 'sk-wb2-prefix', enabled: true, created_at: '2026-09-30T10:00:00Z' } };
   await run('submitAPIKey()');
