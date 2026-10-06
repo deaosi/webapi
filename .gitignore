@@ -34,6 +34,9 @@ docs/
 # 设计/计划文档（但 README.md 必须进版本库）
 *.md
 !README.md
+# 内置默认提示词：虽为 .md，但由 go:embed 打进二进制（internal/prompt/prompt.go），
+# 缺失会让 go build 直接失败，必须入库
+!internal/prompt/defaultprompt.md
 
 # Windows binaries
 /wb2api.exe
