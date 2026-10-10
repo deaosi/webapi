@@ -18,6 +18,7 @@ stdlib only, no pip deps.
 """
 import argparse
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -1203,6 +1204,49 @@ def _anthropic_err(status, msg, etype="invalid_request_error"):
                        ensure_ascii=False).encode())
 
 
+# ---------------- caller key verification ----------------
+#
+# 两档鉴权（与 zen-gateway 同款，保证「同一把调用密钥走 /v1 与 /adapter 都通」）：
+#   1. panel 主密钥 -> 直接放行；
+#   2. 其他密钥 -> 拿去向 panel 核实（面板创建的调用密钥只存 sha256，只有 panel 能判）。
+# 不这样做的话，面板里创建的 sk-wb2a-... 调用密钥在 /adapter 一律 401——而同样的密钥
+# 走 /v1（经 zen）却正常，客户端表现为 provider_auth_failed，极难自查。
+
+_KEY_VERDICTS = {}      # key -> (ok: bool, at: float)
+_KEY_VERDICT_TTL = 60.0  # 判定缓存秒数：假密钥最多一次探测/TTL
+_KEY_VERDICT_MAX = 512   # 缓存上限（超了整体清空，防无界增长）
+
+
+def _caller_key(headers):
+    """入站请求的调用密钥：Authorization: Bearer 优先，其次 x-api-key（Anthropic 习惯）。"""
+    authz = headers.get("Authorization") or ""
+    if authz.startswith("Bearer "):
+        return authz[7:].strip()
+    return (headers.get("x-api-key") or "").strip()
+
+
+def panel_accepts_key(key):
+    """问 panel 这个调用密钥是否有效。
+
+    panel 不可达/超时 -> False（让请求走正常 401，不把 panel 抖动变成放行）。
+    TTL 内命中缓存则零额外请求。
+    """
+    now_t = time.time()
+    hit = _KEY_VERDICTS.get(key)
+    if hit and now_t - hit[1] < _KEY_VERDICT_TTL:
+        return hit[0]
+    ok = False
+    try:
+        st, _, _ = panel_get("/v1/models", {"Authorization": "Bearer " + key}, timeout=8)
+        ok = st == 200
+    except Exception:
+        ok = False
+    if len(_KEY_VERDICTS) > _KEY_VERDICT_MAX:
+        _KEY_VERDICTS.clear()
+    _KEY_VERDICTS[key] = (ok, now_t)
+    return ok
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "wk2api-adapter/1.0"
 
@@ -1224,25 +1268,20 @@ class Handler(BaseHTTPRequestHandler):
     def _auth_ok(self):
         key = load_adapter_key()
         if not key:
+            return True  # panel 未设主密钥 = 不鉴权（与 panel 自身口径一致）
+        given = _caller_key(self.headers)
+        if not given:
+            return False
+        if hmac.compare_digest(given, key):
             return True
-        authz = self.headers.get("Authorization") or ""
-        if authz == "Bearer " + key:
-            return True
-        if (self.headers.get("x-api-key") or "") == key:
-            return True
-        return False
+        return panel_accepts_key(given)
 
     def _upstream_headers(self, extra=None):
+        # 调用方已在 _auth_ok 验过，上游一律用 panel 主密钥（与 zen-gateway 的
+        # proxyToPanel 同款）：panel 只认主密钥，把客户端的调用密钥转发过去会 401。
         key = load_adapter_key()
         h = {"Content-Type": "application/json"}
-        # Forward client Bearer (usable directly if it equals panel key), else inject panel key
-        authz = self.headers.get("Authorization") or ""
-        xkey = self.headers.get("x-api-key") or ""
-        if authz.startswith("Bearer ") and authz[8:] == key:
-            h["Authorization"] = authz
-        elif xkey and xkey == key:
-            h["Authorization"] = "Bearer " + key
-        elif key:
+        if key:
             h["Authorization"] = "Bearer " + key
         if extra:
             h.update(extra)

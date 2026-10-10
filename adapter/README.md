@@ -11,8 +11,23 @@ Panel（Go）原生只讲 Chat（`POST /v1/chat/completions`、`GET /v1/models`�
 | Codex | Responses | `.../adapter/v1/responses` | `...:8788/v1/responses` |
 | Claude Code | Messages | `.../adapter/v1/messages`（Base URL 去掉末尾 `/v1`） | `...:8788/v1/messages` |
 
-模型名保持网关路由协议（`cn:xxx` / `global:xxx`）；Anthropic 客户端接受
-`Bearer` 或 `x-api-key` 鉴权，同一把调用密钥通用（见面板「API 密钥」页）。
+模型名保持网关路由协议（`cn:xxx` / `global:xxx`）。
+
+## 鉴权（与 zen-gateway 同款两档）
+
+| 档 | 密钥 | 说明 |
+|---|---|---|
+| 1 | panel 主密钥（`/etc/wb2api/config.json` 的 `api_key`） | 直接放行 |
+| 2 | 面板「API 密钥」页创建的调用密钥（`sk-wb2a-…`） | 拿去向 panel `/v1/models` 核实，短 TTL（60s）缓存判定 |
+
+请求头用 `Authorization: Bearer <key>` 或 `x-api-key: <key>` 均可。
+
+> 为什么必须两档：调用密钥在 panel 侧只存 SHA-256，只有 panel 能判有效性。
+> 若只认主密钥，面板里创建的调用密钥直连 `/adapter/*` 会一律 401，而同一把
+> 密钥走 `/v1`（经 zen，zen 有两档）却正常——客户端只报“鉴权失败”，极难自查。
+
+上游一律用 panel 主密钥出站（panel 只认主密钥），**不把客户端的调用密钥转发给
+panel**；`panel` 不可达时按“未通过”处理（不把 panel 抖动变成放行）。
 
 ## 文件
 
