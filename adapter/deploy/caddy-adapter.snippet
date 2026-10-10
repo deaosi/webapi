@@ -1,0 +1,19 @@
+# wb2api proto adapter: Responses / Anthropic tri-protocol behind the same host.
+# Merge the handle block into the existing wb2api.fanwulink.cn { ... } site,
+# then:  sudo systemctl reload caddy
+#
+#  /adapter/v1/chat/completions  -> panel Chat (passthrough)
+#  /adapter/v1/responses         -> translated to Chat (Codex)
+#  /adapter/v1/messages          -> translated to Chat (Claude Code)
+#  /adapter/v1/models            -> panel models list
+#
+# NOTE: paths are stripped (/adapter prefix removed) before proxying,
+# so clients use https://wb2api.fanwulink.cn/adapter/v1/... as Base URL.
+# Auth: same panel api_key (Bearer or x-api-key).
+
+	handle /adapter/* {
+		uri strip_prefix /adapter
+		reverse_proxy 127.0.0.1:8788 {
+			flush_interval -1
+		}
+	}

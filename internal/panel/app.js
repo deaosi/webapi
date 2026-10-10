@@ -200,6 +200,15 @@ function apiEndpoints(origin) {
   const base = String(origin || '').replace(/\/+$/, '') + '/v1';
   return { base, chat: base + '/chat/completions', models: base + '/models' };
 }
+// 三协议适配层地址：与面板同机，路径/端口按部署形态推导。
+// 服务端 Caddy：同 origin 下 /adapter/v1；本地开发 panel :8888 时 adapter 在 :8788。
+function adapterEndpoints(origin) {
+  const o = String(origin || '').replace(/\/+$/, '');
+  const base = /:8888$/.test(o) ? o.replace(/:8888$/, ':8788') + '/v1' : o + '/adapter/v1';
+  return { base, chat: base + '/chat/completions', responses: base + '/responses',
+    messages: base + '/messages', countTokens: base + '/messages/count_tokens',
+    models: base + '/models' };
+}
 // 列表只保留元数据，创建返回的完整 secret 不进入列表或本地存储。
 function apiKeyMetadata(key) {
   return {
@@ -224,6 +233,13 @@ function renderAPIEndpoints() {
   $('akBaseURL').value = urls.base;
   $('akChatURL').value = urls.chat;
   $('akModelsURL').value = urls.models;
+  const tri = adapterEndpoints(location.origin);
+  const set = (id, v) => { const el = $(id); if (el) el.value = v; };
+  set('akTriBaseURL', tri.base);
+  set('akTriChatURL', tri.chat);
+  set('akTriRespURL', tri.responses);
+  set('akTriMsgURL', tri.messages);
+  set('akTriModelsURL', tri.models);
 }
 function renderAPIKeys() {
   const s = apiKeyState, total = s.rows.length;

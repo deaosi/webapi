@@ -37,6 +37,8 @@ docs/
 # 内置默认提示词：虽为 .md，但由 go:embed 打进二进制（internal/prompt/prompt.go），
 # 缺失会让 go build 直接失败，必须入库
 !internal/prompt/defaultprompt.md
+# 三协议适配层说明（adapter/README.md，随适配层一起发布）
+!adapter/README.md
 
 # Windows binaries
 /wb2api.exe

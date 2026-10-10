@@ -1,0 +1,35 @@
+[Unit]
+Description=wk2api proto adapter (Responses/Anthropic -> Chat, stateless)
+Documentation=https://github.com/deaosi/webapi
+After=network-online.target wb2api.service
+Wants=network-online.target
+ConditionPathExists=/opt/wb2api-adapter/proto_adapter.py
+
+[Service]
+Type=simple
+User=wb2api
+Group=wb2api
+WorkingDirectory=/opt/wb2api-adapter
+Environment=TZ=Asia/Shanghai
+ExecStart=/usr/bin/python3 /opt/wb2api-adapter/proto_adapter.py --listen 127.0.0.1:8788 --panel http://127.0.0.1:7863
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+# Hardening: read-only root (key read from /etc/wb2api/config.json stays readable),
+# no new privs, private /tmp, no home access. Adapter is stateless, writes nothing.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+LimitNOFILE=16384
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

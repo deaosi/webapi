@@ -752,6 +752,23 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <label class="fld"><span class="lb">模型端点</span>
             <div class="inline"><input id="akModelsURL" readonly aria-label="模型端点"><button type="button" class="xs" data-act="ak-copy-url" data-target="akModelsURL">复制</button></div></label>
           <p class="ak-note">地址来自当前浏览器访问的服务地址。调用时在 Authorization 中使用 Bearer 调用密钥。</p>
+          <p class="ak-note">本网关原生仅 Chat 协议（聊天/模型）。Responses（Codex）与 Anthropic Messages（Claude Code）由三协议适配层提供，同一把调用密钥通用：Anthropic 客户端可用 Bearer 或 x-api-key 鉴权。</p>
+        </div>
+      </div>
+      <div class="box ak-address">
+        <header><h3>三协议地址（适配层）</h3><span class="grow"></span><span class="note">Chat / Responses / Messages</span></header>
+        <div class="pad">
+          <label class="fld"><span class="lb">三协议 Base URL</span>
+            <div class="inline"><input id="akTriBaseURL" readonly aria-label="三协议 Base URL"><button type="button" class="xs" data-act="ak-copy-url" data-target="akTriBaseURL">复制</button></div></label>
+          <label class="fld"><span class="lb">Chat（OpenAI 兼容）</span>
+            <div class="inline"><input id="akTriChatURL" readonly aria-label="三协议聊天端点"><button type="button" class="xs" data-act="ak-copy-url" data-target="akTriChatURL">复制</button></div></label>
+          <label class="fld"><span class="lb">Responses（Codex）</span>
+            <div class="inline"><input id="akTriRespURL" readonly aria-label="Responses 端点"><button type="button" class="xs" data-act="ak-copy-url" data-target="akTriRespURL">复制</button></div></label>
+          <label class="fld"><span class="lb">Messages（Claude Code）</span>
+            <div class="inline"><input id="akTriMsgURL" readonly aria-label="Messages 端点"><button type="button" class="xs" data-act="ak-copy-url" data-target="akTriMsgURL">复制</button></div></label>
+          <label class="fld"><span class="lb">模型端点</span>
+            <div class="inline"><input id="akTriModelsURL" readonly aria-label="三协议模型端点"><button type="button" class="xs" data-act="ak-copy-url" data-target="akTriModelsURL">复制</button></div></label>
+          <p class="ak-note">Anthropic 客户端把 Base URL 填到三协议地址（去掉末尾 /v1），模型填 cn:xxx；适配层无状态，不支持 Responses 的 previous_response_id（传完整 input 代替）。</p>
         </div>
       </div>
       <div class="box">

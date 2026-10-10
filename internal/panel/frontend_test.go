@@ -428,8 +428,21 @@ run('api = mockAPI');
   assert.deepStrictEqual(JSON.parse(run("JSON.stringify(apiEndpoints('https://api.example:9443'))")), {
     base: 'https://api.example:9443/v1', chat: 'https://api.example:9443/v1/chat/completions', models: 'https://api.example:9443/v1/models'
   });
+  assert.deepStrictEqual(JSON.parse(run("JSON.stringify(adapterEndpoints('https://api.example:9443'))")), {
+    base: 'https://api.example:9443/adapter/v1', chat: 'https://api.example:9443/adapter/v1/chat/completions',
+    responses: 'https://api.example:9443/adapter/v1/responses', messages: 'https://api.example:9443/adapter/v1/messages',
+    countTokens: 'https://api.example:9443/adapter/v1/messages/count_tokens', models: 'https://api.example:9443/adapter/v1/models'
+  });
+  assert.deepStrictEqual(JSON.parse(run("JSON.stringify(adapterEndpoints('http://127.0.0.1:8888'))")), {
+    base: 'http://127.0.0.1:8788/v1', chat: 'http://127.0.0.1:8788/v1/chat/completions',
+    responses: 'http://127.0.0.1:8788/v1/responses', messages: 'http://127.0.0.1:8788/v1/messages',
+    countTokens: 'http://127.0.0.1:8788/v1/messages/count_tokens', models: 'http://127.0.0.1:8788/v1/models'
+  });
   run('renderAPIEndpoints()');
   assert.strictEqual(get('akBaseURL').value, 'http://127.0.0.1:4321/v1');
+  assert.strictEqual(get('akTriBaseURL').value, 'http://127.0.0.1:4321/adapter/v1');
+  assert.strictEqual(get('akTriRespURL').value, 'http://127.0.0.1:4321/adapter/v1/responses');
+  assert.strictEqual(get('akTriMsgURL').value, 'http://127.0.0.1:4321/adapter/v1/messages');
   failure = true;
   run("openAPIKeyModal('create'); $('akName').value = 'Client <one>'");
   await run('submitAPIKey()');
