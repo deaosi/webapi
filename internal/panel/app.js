@@ -13,7 +13,7 @@ const apiKeyState = {
 
 // chState 渠道页状态：声明显式提前到顶层 go() 之前（const TDZ——开局 hash 如果是
 // #channels，顶层 go() 在文件求值中途就会调 loadChannels，滞后声明直接炸）。
-const chState = { defs: {}, keys: {}, enabled: true, keyList: [], members: {}, dirty: false, loaded: false };
+const chState = { defs: {}, keys: {}, enabled: true, keyList: [], members: {}, route: {}, dirty: false, loaded: false };
 
 const $ = id => document.getElementById(id);
 
@@ -604,21 +604,58 @@ const pickState = { pick: null, dirty: false };
 // A 写盘、B 写盘）会让先写的修改被后写的整盘覆盖，静默丢一次操作。
 let poolPatchChain = Promise.resolve();
 
-// pushPoolPatch 读盘合并后再写回 pool.accounts/groups（整体替换语义，即删即删）。
-// 用途：分组/账号的增删改这类"单个小操作直接入库"，不再经过"页面级 dirty + 全量保存"。
-// mutator 收到 { accounts, groups } 两个可变对象，就地改即可；空输入不碰对应键。
-function pushPoolPatch(mutator) {
+// pushConfigPatch 读盘合并后一次写回池分组 + 渠道定义 + 密钥绑定。
+//
+// 为什么渠道与分组必须一起写：本设计里"渠道 = 账号分组"，渠道特有属性（realm /
+// 白名单 / 启用）在 channels.groups，路由属性（优先级 / 权重）在 pool.groups，
+// 还有指向它的 channels.keys 绑定。三者分开写必然产生中间态：
+//   - 在账号池删了分组、渠道定义没删 → 绑定指向未定义分组 → 服务端校验拒绝保存；
+//   - 在渠道页删了渠道、账号池分组还在 → 用户看不到"渠道"却有账号在该组；
+//   - 在账号池新建分组、渠道侧没有定义 → 渠道页列不出它，无处配 realm / 白名单。
+// 一次写盘让"删分组 = 同时删渠道 + 解绑、建分组 = 同时建默认渠道"天然成立。
+//
+// mutator 收到 state，就地改即可：
+//   { accounts, groups, chGroups, chKeys, chEnabled }
+function pushConfigPatch(mutator) {
   const run = poolPatchChain.then(async () => {
     const cfg = await api('config');
-    const pool = (cfg && cfg.config && cfg.config.pool) || {};
-    const accounts = Object.assign({}, pool.accounts || {});
-    const groups = Object.assign({}, pool.groups || {});
-    mutator({ accounts, groups });
-    return api('config', { method: 'POST', body: JSON.stringify({ pool: { accounts, groups } }) });
+    const c = (cfg && cfg.config) || {};
+    const pool = c.pool || {}, ch = c.channels || {};
+    const state = {
+      accounts: Object.assign({}, pool.accounts || {}),
+      groups: Object.assign({}, pool.groups || {}),
+      chGroups: Object.assign({}, ch.groups || {}),
+      chKeys: Object.assign({}, ch.keys || {}),
+      chEnabled: ch.enabled !== false,
+    };
+    mutator(state);
+    return api('config', { method: 'POST', body: JSON.stringify({
+      pool: { accounts: state.accounts, groups: state.groups },
+      channels: { enabled: state.chEnabled, groups: state.chGroups, keys: state.chKeys },
+    }) });
   });
   // 链不断：失败只拒绝本次调用，下一位照常执行。
   poolPatchChain = run.catch(() => {});
   return run;
+}
+
+// dropGroupEverywhere 从 state 删掉一个分组：池分组、渠道定义、以及指向它的全部密钥
+// 绑定（三者必须同生同死，见 pushConfigPatch 注释）。
+function dropGroupEverywhere(state, name) {
+  delete state.groups[name];
+  delete state.chGroups[name];
+  for (const id of Object.keys(state.chKeys)) {
+    if (state.chKeys[id] === name) delete state.chKeys[id];
+  }
+}
+
+// ensureChannelDef 保证某分组在渠道侧有定义（账号池新建/编辑分组时同步建默认渠道，
+// 否则该分组在渠道页不可见，用户无处配 realm / 白名单 / 启用）。
+function ensureChannelDef(state, name) {
+  if (state.chGroups[name]) return state.chGroups[name];
+  const def = { label: '', realm: '', models: [], enabled: true };
+  state.chGroups[name] = def;
+  return def;
 }
 function pickData() {
   return (pickState.pick) || (overviewData && overviewData.pick) || null;
@@ -668,15 +705,22 @@ function renderPick() {
   }).join('') : '<tr><td colspan="5"><div class="empty">无分组（账号直比）。点「新增分组」创建主备组。</div></td></tr>';
   // 账号权重表（只读 + 编辑按钮；权重/分组/优先级走弹窗 editAcctModal）
   const rows = pickAcctRows();
-  const tot = rows.reduce((a, r) => a + Number(r.picks || 0), 0);
-  const groupNames = groups.map(g => g.name);
+  // 配置权重份额：weight_cfg>0 的归一占比。**不再**画"实际选中次数"——那反映的是历史
+  // 流量，与权重设置无关：把某号调到 9 倍，条仍然是各 20%，看着像没生效（用户已反馈）。
+  // 现在按权重画，设 3:1 立刻看到 75%:25%。
+  const wOf = r => { const v = Number(r.weight); return (Number.isFinite(v) && v > 0) ? v : 0; };
+  const wSum = rows.reduce((a, r) => a + wOf(r), 0);
+  const picksTotal = rows.reduce((a, r) => a + Number(r.picks || 0), 0);
   $('pickAcctBody').innerHTML = rows.length ? rows.map(r => {
     const uid = String(r.uid || '');
     const short = uid.length > 16 ? uid.slice(0, 16) + '…' : uid;
-    const pct = tot ? Math.round((r.picks || 0) / tot * 100) : 0;
-    const wv = Number(r.weight);
-    const weightVal = Number.isFinite(wv) ? wv : 1;
-    const wTag = weightVal === 0 ? ' <span class="tag bad">摘除</span>' : '';
+    const wv = wOf(r);
+    const weightVal = Number.isFinite(Number(r.weight)) ? Number(r.weight) : 1;
+    const pct = wSum ? Math.round(wv / wSum * 100) : 0;
+    // 已消耗份额（按 pick 次数占统计总量）与配置份额同图对照：深色=已消耗，浅色=剩余
+    // 配额，一眼看出"配了多少 vs 用掉多少"，而配置份额本身立刻随设置变化。
+    const usedPct = picksTotal ? Math.min(pct, Math.round(Number(r.picks || 0) / picksTotal * 100)) : 0;
+    const wTag = wv === 0 ? ' <span class="tag bad">摘除</span>' : '';
     const grpTag = r.group ? esc(r.group) : '<span class="note">（无）</span>';
     const nm = r.nickname
       ? esc(r.nickname)
@@ -686,11 +730,13 @@ function renderPick() {
       '<td>' + grpTag + '</td>' +
       '<td class="num">' + r.priority + '</td>' +
       '<td class="num">' + weightVal + wTag + '</td>' +
-      '<td class="num" title="w_base × weight_cfg">' + (Number(r.w_final || 0).toFixed(2)) + '</td>' +
+      '<td class="num" title="w_base × weight_cfg：被 pick 过才有值，未选过即 0">' +
+        (Number(r.w_final || 0).toFixed(2)) + '</td>' +
       '<td class="num">' + (r.picks || 0) + '次</td>' +
-      '<td><div class="pick-share" title="' + pct + '%"><i style="width:' + pct + '%"></i></div>' +
+      '<td><div class="pick-share" title="权重份额 ' + pct + '% · 已消耗 ' + usedPct + '%">' +
+        '<i style="width:' + usedPct + '%"></i><b style="width:' + (pct - usedPct) + '%"></b></div>' +
       '<button class="xs ghost" data-act="acct-edit" data-u="' + esc(uid) + '">编辑</button></td></tr>';
-  }).join('') : '<tr><td colspan="7"><div class="empty">池是空的</div></td></tr>';
+  }).join('') : '<tr><td colspan="8"><div class="empty">池是空的</div></td></tr>';
 }
 function pickErr(msg) {
   const el = $('pickError');
@@ -713,7 +759,7 @@ document.addEventListener('click', ev => {
 });
 // ── 分组 / 账号编辑弹窗（只读表 + 弹窗编辑，NewAPI 渠道页同款交互） ──
 // 设计：行内 input 全删（6-8 个并发写盘 + 组名改名映射，全是断裂点）。
-// 新增/编辑 → 弹窗填完 → pushPoolPatch 读盘改盘一次写入 → loadOverview(true) 刷新。
+// 新增/编辑 → 弹窗填完 → pushConfigPatch 一次读盘改盘 → loadOverview(true) 刷新。
 const editState = {
   kind: '',        // 'group' | 'acct'
   uid: '',         // acct 编辑时：账号 UID；group 编辑时：原分组名
@@ -743,7 +789,7 @@ function editGroupModal(mode, name) {
   $('editGroupSelRow').hidden = true;
   $('editHint').textContent = mode === 'create'
     ? '分组只是路由名：建好后，到下面的账号表里把账号划进该分组。'
-    : '改优先级/权重即时按 pushPoolPatch 入库；改名走删除+新建（账号跟随迁移）。';
+    : '改优先级/权重即时按 pushConfigPatch 入库；改名走删除+新建（账号跟随迁移）。';
   $('editModalError').hidden = true; $('editModalError').textContent = '';
   $('editSave').disabled = false; $('editSave').textContent = mode === 'create' ? '创建' : '保存';
   openVeil('editVeil');
@@ -787,7 +833,7 @@ function closeEditModal(restoreFocus) {
   if (restoreFocus && editState.opener && editState.opener.isConnected) editState.opener.focus();
   editState.opener = null;
 }
-// editSubmit 弹窗提交：只允许走 pushPoolPatch（读盘→改盘→整 subtree 回写的一次 POST）。
+// editSubmit 弹窗提交：只允许走 pushConfigPatch（读盘→改盘→整 subtree 回写的一次 POST）。
 // 与旧 savePick（内存 dirty + 全量 POST）彻底分离，避免两种写盘路径交错覆盖。
 async function editSubmit() {
   if (editState.saving || !editState.modalOpen) return;
@@ -802,8 +848,9 @@ async function editSubmit() {
     if (!Number.isFinite(w) || w <= 0) { fail('分组权重必须 >0 的数字'); $('editWeight').focus(); return; }
     editState.saving = true; $('editSave').disabled = true; $('editSave').textContent = '保存中…';
     try {
-      await pushPoolPatch(({ groups }) => {
-        groups[name] = { priority: pri, weight: w };
+      await pushConfigPatch(state => {
+        state.groups[name] = { priority: pri, weight: w };
+        ensureChannelDef(state, name);
       });
       toast('分组「' + name + '」已保存', 'ok');
       closeEditModal(false);
@@ -821,8 +868,8 @@ async function editSubmit() {
     if (!Number.isFinite(w) || w < 0) { fail('权重必须 ≥0 的数字（0=软摘除）'); $('editWeight').focus(); return; }
     editState.saving = true; $('editSave').disabled = true; $('editSave').textContent = '保存中…';
     try {
-      await pushPoolPatch(({ accounts }) => {
-        accounts[uid] = { priority: pri, weight: w, group: g };
+      await pushConfigPatch(state => {
+        state.accounts[uid] = { priority: pri, weight: w, group: g };
       });
       toast('账号权重已保存', 'ok');
       closeEditModal(false);
@@ -832,22 +879,13 @@ async function editSubmit() {
     return;
   }
 }
-// grpDelete 删除分组：pushPoolPatch 同一次写盘里删组 + 解绑该组成员（服务端整体替换）。
+// grpDelete 删除分组：同一次写盘里删池分组 + 渠道定义 + 指向它的全部密钥绑定。
 async function grpDelete(name) {
   if (!name) return;
   if (!confirm('删除分组「' + name + '」？该组成员自动回到无组。')) return;
   pickErr('');
   try {
-    await pushPoolPatch(({ accounts, groups }) => {
-      delete groups[name];
-      for (const uid of Object.keys(accounts)) {
-        const cur = accounts[uid];
-        const grp = (cur && typeof cur === 'object') ? String(cur.group || '') : '';
-        if (grp === name) {
-          accounts[uid] = { priority: (cur || {}).priority || 0, weight: ('weight' in (cur || {})) ? cur.weight : 1, group: '' };
-        }
-      }
-    });
+    await pushConfigPatch(state => { dropGroupEverywhere(state, name); });
     toast('分组「' + name + '」已删除', 'ok');
     loadOverview(true);
   } catch (e) { pickErr(e.message); toast('删除失败：' + e.message, 'err'); }
@@ -870,7 +908,7 @@ document.addEventListener('keydown', ev => {
 });
 async function savePick() {
   // 「保存策略」只保存模式/算法/快过期开关与窗口（页面级 4 个控件）。
-  // 分组与账号权重走各自弹窗的 pushPoolPatch 单次入库，两条写盘路径彻底分离——
+  // 分组与账号权重走各自弹窗的 pushConfigPatch 单次入库，两条写盘路径彻底分离——
   // 不再从 DOM 全量回读，避免"内存脏态 + 全量 POST"把弹窗提交覆盖掉。
   pickErr('');
   const btn = $('btnPickSave');
@@ -2633,15 +2671,18 @@ function renderChannels() {
       : '<span class="tag warn">无成员</span>';
     const eTag = enabled ? '' : ' <span class="tag bad">停用</span>';
     const wl = chModelListText(d.models);
+    const rt = chState.route[n] || {};
     return '<tr title="成员：' + esc(members.join('、') || '（无）') + '">' +
       '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div></td>' +
       '<td>' + ((d.realm || '') === '' ? '<span class="note">（不限）</span>' : esc(d.realm)) + '</td>' +
       '<td>' + (wl ? esc(wl) : '<span class="note">（不限）</span>') + '</td>' +
+      '<td class="num">' + (rt.priority != null ? rt.priority : 0) + '</td>' +
+      '<td class="num">' + (rt.weight != null ? rt.weight : 1) + '</td>' +
       '<td>' + mTag + '</td>' +
       '<td><span class="tag ' + (enabled ? 'ok">启用' : 'bad">停用') + '</span>' + eTag + '</td>' +
       '<td><button class="xs ghost" data-act="ch-edit" data-g="' + esc(n) + '">编辑</button> ' +
       '<button class="xs ghost danger" data-act="ch-del" data-g="' + esc(n) + '">删除</button></td></tr>';
-  }).join('') : '<tr><td colspan="6"><div class="empty">还没有渠道。点「新增渠道」创建一个分组渠道，' +
+  }).join('') : '<tr><td colspan="8"><div class="empty">还没有渠道。点「新增渠道」创建一个分组渠道，' +
       '再到账号池把账号归入该分组。</div></td></tr>';
 
   // 密钥绑定表（只读生效列 + 绑定按钮走弹窗；下拉选择走独立 saveKeyGroup 单次入库）
@@ -2681,6 +2722,13 @@ async function loadChannels() {
     const ch = (cfg && cfg.config && cfg.config.channels) || {};
     chState.enabled = ch.enabled !== false;
     chState.defs = ch.groups || {};
+    // route = pool.groups 的同名路由属性（优先级/权重）。渠道弹窗要能改它，渠道页也要
+    // 显示该分组当前路由配置——两边同源，避免"渠道页看不到权重、账号池看不到榜单"。
+    const poolGroups = ((cfg && cfg.config && cfg.config.pool) || {}).groups || {};
+    chState.route = {};
+    for (const n of Object.keys(chState.defs)) {
+      chState.route[n] = poolGroups[n] || { priority: 0, weight: 1 };
+    }
     // 绑定只保留值非空的项（null / "" 都视为已解绑）。
     const rawKeys = ch.keys || {};
     chState.keys = {};
@@ -2738,6 +2786,12 @@ function chEditModal(mode, name) {
   $('chEditRealm').value = (row && row.realm) || '';
   $('chEditModels').value = chModelListText((row && row.models) || []);
   $('chEditEnabled').checked = !row || row.enabled !== false;
+  // 路由属性（优先级/权重）在 pool.groups，渠道弹窗里一并可改。
+  const route = (mode === 'edit' && chState.route[name]) || {};
+  $('chEditPriority').value = route.priority != null ? route.priority : 0;
+  const rw = Number(route.weight);
+  $('chEditWeight').value = Number.isFinite(rw) && rw > 0 ? rw : 1;
+  chEditRenderMembers(name, mode);
   $('chEditHint').textContent = mode === 'create'
     ? '建好后，到账号池把账号划进该分组，成员数随后显示。'
     : '改名走删除+新建；该渠道绑定的密钥保持原分组名（需另行调整）。';
@@ -2745,6 +2799,19 @@ function chEditModal(mode, name) {
   $('chEditSave').disabled = false; $('chEditSave').textContent = mode === 'create' ? '创建' : '保存';
   $('chEditVeil').classList.add('on');
   nm.focus();
+}
+// chEditRenderMembers 在渠道弹窗里显示成员账号（昵称优先）与引导文案。
+function chEditRenderMembers(name, mode) {
+  const el = $('chEditMembers');
+  if (!el) return;
+  if (mode !== 'edit') {
+    el.textContent = '新建后，在账号池页把账号的「分组」选成本渠道，这里会列出成员。';
+    return;
+  }
+  const members = channelMemberNames(name);
+  el.textContent = members.length
+    ? '当前成员（' + members.length + '）：' + members.join('、')
+    : '暂无成员：在账号池页把账号的「分组」选成本渠道。';
 }
 function suggestChannelName() {
   let i = Object.keys(chState.defs).length + 1, name = 'channel' + i;
@@ -2770,12 +2837,18 @@ async function chEditSubmit() {
   const models = String($('chEditModels').value || '').split(',').map(s => s.trim()).filter(Boolean);
   const label = String($('chEditLabel').value || '').trim();
   const enabled = !!$('chEditEnabled').checked;
+  const pri = Math.trunc(Number(String($('chEditPriority').value).trim()));
+  if (!Number.isFinite(pri)) { chEditErr('优先级必须是整数'); $('chEditPriority').focus(); return; }
+  const w = Number(String($('chEditWeight').value).trim());
+  if (!Number.isFinite(w) || w <= 0) { chEditErr('渠道权重必须 >0 的数字'); $('chEditWeight').focus(); return; }
   chEditState.saving = true; $('chEditSave').disabled = true; $('chEditSave').textContent = '保存中…';
   try {
-    const body = await readChannelsFull();
-    body.groups = body.groups || {};
-    body.groups[name] = { label, realm, models, enabled };
-    const r = await api('config', { method: 'POST', body: JSON.stringify({ channels: body }) });
+    // 一次写盘：渠道属性（channels.groups）与路由属性（pool.groups）同时落，
+    // 不会出现"渠道建好但账号池分组缺失"的中间态。
+    await pushConfigPatch(state => {
+      state.chGroups[name] = { label, realm, models, enabled };
+      state.groups[name] = { priority: pri, weight: w };
+    });
     toast('渠道「' + name + '」已保存', 'ok');
     closeChEditModal(false);
     await loadChannels();
@@ -2784,15 +2857,10 @@ async function chEditSubmit() {
 }
 async function chDelete(name) {
   if (!name) return;
-  if (!confirm('删除渠道「' + name + '」？绑定到该分组的密钥会自动解绑。')) return;
+  if (!confirm('删除渠道「' + name + '」？该分组成员回到无组，绑定该分组的密钥会解绑。')) return;
   chErr('');
   try {
-    const body = await readChannelsFull();
-    delete (body.groups || {})[name];
-    for (const id of Object.keys(body.keys || {})) {
-      if (body.keys[id] === name) delete body.keys[id];
-    }
-    await api('config', { method: 'POST', body: JSON.stringify({ channels: body }) });
+    await pushConfigPatch(state => { dropGroupEverywhere(state, name); });
     toast('渠道「' + name + '」已删除', 'ok');
     await loadChannels();
   } catch (e) { chErr(e.message); toast('删除失败：' + e.message, 'err'); }
@@ -2833,11 +2901,10 @@ async function keyBindSubmit() {
   if (g && !chState.defs[g]) { keyBindErr('分组「' + g + '」不存在，请先创建渠道'); return; }
   keyBindState.saving = true; $('keyBindSave').disabled = true; $('keyBindSave').textContent = '保存中…';
   try {
-    const body = await readChannelsFull();
-    body.keys = body.keys || {};
-    if (g) body.keys[id] = g;
-    else delete body.keys[id];
-    await api('config', { method: 'POST', body: JSON.stringify({ channels: body }) });
+    await pushConfigPatch(state => {
+      if (g) state.chKeys[id] = g;
+      else delete state.chKeys[id];
+    });
     toast(g ? '已绑定到「' + g + '」' : '已解绑，全池可用', 'ok');
     closeKeyBindModal(false);
     await loadChannels();

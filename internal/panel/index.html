@@ -307,8 +307,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 h4.sub-h { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; margin: 2px 0 10px; }
 h4.sub-h .hint { font-size: 11.5px; font-weight: 400; color: var(--ink-3); }
 h4.sub-h .grow { flex: 1; }
-.pick-share { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; min-width: 80px; }
+.pick-share { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; min-width: 80px; display: flex; }
 .pick-share > i { display: block; height: 100%; background: var(--accent); }
+/* 剩余配额段：同一根条里"已消耗(深)/配额(浅)"对照，配置权重直观可见 */
+.pick-share > b { display: block; height: 100%; background: color-mix(in srgb, var(--accent) 32%, transparent); }
 input.num-sm { width: 76px; }
 select.grp-sel { max-width: 130px; }
 .switch { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; }
@@ -652,10 +654,11 @@ select.grp-sel { max-width: 130px; }
           <div class="hr"></div>
           <h4 class="sub-h">账号权重 <span class="hint">weight 0 = 软摘除（不出池，只是不被选中）</span></h4>
           <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>账号</th><th>分组</th><th>优先级</th><th>权重</th><th>最终权重</th><th>选中</th><th>占比</th><th class="c-acts">操作</th></tr></thead>
+            <thead><tr><th>账号</th><th>分组</th><th>优先级</th><th>权重</th><th>最终权重</th><th>选中</th><th>占比（按配置权重）</th><th class="c-acts">操作</th></tr></thead>
             <tbody id="pickAcctBody"></tbody>
           </table></div>
-          <p class="ak-note">「保存策略」只保存上面的模式/算法/快过期三项；分组与账号走本行的弹窗编辑、单次入库。分布计数重启归零。</p>
+          <p class="ak-note">占比条就是<strong>配置权重</strong>换算（0=摘除）：深色=已消耗，浅色=剩余配额，改权重立刻按比例变化。
+            「保存策略」只保存上面的模式/算法/快过期；分组与账号走弹窗编辑、单次入库。</p>
           <div class="ak-error" id="pickError" role="status" hidden></div>
         </div>
       </div>
@@ -939,10 +942,10 @@ select.grp-sel { max-width: 130px; }
             即直连 panel 的 <code>/v1/*</code>（公网经 Caddy 的同路径亦可）。<code>/adapter/v1/*</code> 目前把上游身份统一换成主密钥，
             绑定在该路径上视同未绑定——这是已知限制，跨路径透传调用密钥需要单独的鉴权改造。</p>
           <div class="hr"></div>
-          <h4 class="sub-h">渠道定义 <span class="hint">分组名需与账号池里的分组一致；成员数来自当前账号池</span>
+          <h4 class="sub-h">渠道定义 <span class="hint">渠道 = 一个账号分组 + 它的上游属性与路由权重；成员账号在「账号池」页归组</span>
             <span class="grow"></span><button class="xs" id="btnChGroupAdd">新增渠道</button></h4>
           <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>渠道</th><th>上游域</th><th>模型白名单</th><th>成员</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
+            <thead><tr><th>渠道</th><th>上游域</th><th>模型白名单</th><th>优先级</th><th>权重</th><th>成员</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
             <tbody id="chGroupBody"></tbody>
           </table></div>
           <div class="hr"></div>
@@ -980,6 +983,14 @@ select.grp-sel { max-width: 130px; }
           </div>
           <label class="fld"><span class="lb">模型白名单（逗号分隔）</span>
             <input id="chEditModels" placeholder="留空=不限，可 glm-5*" autocomplete="off"></label>
+          <div class="grid2">
+            <label class="fld"><span class="lb">优先级（越小越先消耗）</span>
+              <input id="chEditPriority" type="number" step="1" autocomplete="off"></label>
+            <label class="fld"><span class="lb">权重</span>
+              <input id="chEditWeight" type="number" step="0.1" min="0" autocomplete="off">
+              <span class="hint">同 priority 多组按权重分流，必须 &gt;0</span></label>
+          </div>
+          <p class="ak-note" id="chEditMembers"></p>
           <div class="state err" id="chEditModalError" role="status" hidden></div>
         </div>
         <footer><span class="grow"></span>
