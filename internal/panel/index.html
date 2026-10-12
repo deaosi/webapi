@@ -868,6 +868,9 @@ select.grp-sel { max-width: 130px; }
           <p class="ak-note">渠道 = 一个账号分组 + 该组的上游属性（上游域 / 模型白名单 / 启停）。
             成员账号在<strong>账号池</strong>页的「分组」列指定；绑定了分组的密钥<strong>只能</strong>用同组账号，
             组内无可用即返回错误，<strong>不会</strong>借用其他分组的账号。未绑定分组的密钥不受限制。</p>
+          <p class="ak-note"><strong>生效路径说明</strong>：渠道分组只在<strong>经过网关鉴权（`withAPIAuth`）能看到调用密钥 ID 的入口</strong>生效，
+            即直连 panel 的 <code>/v1/*</code>（公网经 Caddy 的同路径亦可）。<code>/adapter/v1/*</code> 目前把上游身份统一换成主密钥，
+            绑定在该路径上视同未绑定——这是已知限制，跨路径透传调用密钥需要单独的鉴权改造。</p>
           <div class="hr"></div>
           <h4 class="sub-h">渠道定义 <span class="hint">分组名需与账号池里的分组一致；成员数来自当前账号池</span>
             <span class="grow"></span><button class="xs" id="btnChGroupAdd">新增渠道</button></h4>
