@@ -536,6 +536,15 @@ const get = id => { if (!nodes.has(id)) nodes.set(id, element()); return nodes.g
 function fakeInput(dataset, value) {
   return { dataset, value: String(value), closest: () => null };
 }
+// acctInputs 可在用例中改值：验证「空权重输入不得被写成 0（软摘除）」。
+let acctInputs = [
+  fakeInput({ uid: 'u-main-0001', f: 'group' }, 'main'),
+  fakeInput({ uid: 'u-main-0001', f: 'priority' }, '0'),
+  fakeInput({ uid: 'u-main-0001', f: 'weight' }, '3'),
+  fakeInput({ uid: 'u-back-0002', f: 'group' }, 'backup'),
+  fakeInput({ uid: 'u-back-0002', f: 'priority' }, '10'),
+  fakeInput({ uid: 'u-back-0002', f: 'weight' }, '1'),
+];
 const sandbox = {
   location: { hash: '#accounts', origin: 'http://127.0.0.1:4321' },
   history: { replaceState() {} },
@@ -543,14 +552,7 @@ const sandbox = {
   navigator: {},
   document: {
     querySelectorAll: (sel) => {
-      if (sel === '#pickAcctBody [data-uid]') return [
-        fakeInput({ uid: 'u-main-0001', f: 'group' }, 'main'),
-        fakeInput({ uid: 'u-main-0001', f: 'priority' }, '0'),
-        fakeInput({ uid: 'u-main-0001', f: 'weight' }, '3'),
-        fakeInput({ uid: 'u-back-0002', f: 'group' }, 'backup'),
-        fakeInput({ uid: 'u-back-0002', f: 'priority' }, '10'),
-        fakeInput({ uid: 'u-back-0002', f: 'weight' }, '1'),
-      ];
+      if (sel === '#pickAcctBody [data-uid]') return acctInputs;
       if (sel === '#grpBody [data-grp]') return [
         { dataset: { grp: 'main', f: 'priority' }, value: '0', closest: () => ({ querySelector: () => ({ value: 'main' }) }) },
         { dataset: { grp: 'main', f: 'weight' }, value: '1', closest: () => ({ querySelector: () => ({ value: 'main' }) }) },
@@ -590,8 +592,8 @@ run('api = mockAPI');
     groups: [{ name: 'main', priority: 0, weight: 1, members: 1 },
              { name: 'backup', priority: 10, weight: 1, members: 1 }],
     accounts: [
-      { uid: 'u-main-0001', weight: 3, priority: 0, group: 'main', w_final: 12.5, sw_current: 0, picks: 30 },
-      { uid: 'u-back-0002', weight: 1, priority: 10, group: 'backup', w_final: 4.2, sw_current: 0, picks: 10 }
+      { uid: 'u-main-0001', nickname: '主号A', weight: 3, priority: 0, group: 'main', w_final: 12.5, sw_current: 0, picks: 30 },
+      { uid: 'u-back-0002', nickname: '备号B', weight: 1, priority: 10, group: 'backup', w_final: 4.2, sw_current: 0, picks: 10 }
     ],
     distribution: { 'u-main-0001': 30, 'u-back-0002': 10 } } };
   run('overviewData = ' + JSON.stringify(pickFixture));
@@ -603,7 +605,14 @@ run('api = mockAPI');
   assert(get('grpBody').innerHTML.includes('main'));
   assert(get('grpBody').innerHTML.includes('backup'));
   const rows = get('pickAcctBody').innerHTML;
-  assert(rows.includes('u-main-0001'.slice(0, 16)));
+  // 账号列必须显示昵称（只给 uid 前 8 位运维认不出是哪个号），短 uid 作次行。
+  assert(rows.includes('主号A'), '账号列应显示昵称');
+  assert(rows.includes('备号B'), '账号列应显示昵称');
+  assert(rows.includes('u-back-0002'.slice(0, 16)), '短 uid 应作次行显示');
+  // 权重输入框必须带真实值：Go 端字段名与前端读取不一致时会渲染成空串，
+  // 而空串在保存侧等价于"摘除整池"（见下方空值用例）。
+  assert(rows.includes('data-f="weight" value="3"'), '权重框应带当前值 3');
+  assert(rows.includes('data-f="weight" value="1"'), '权重框应带当前值 1');
   assert(rows.includes('12.50'));
   assert(rows.includes('75%'));
   // 保存：body 必须带 pool.pick_mode/accounts/groups 三键。
@@ -621,6 +630,16 @@ run('api = mockAPI');
   // 快过期优先开关与窗口必须随同一份 body 提交（与模式/权重同一次深合并保存）。
   assert.strictEqual(body.pool.prefer_expiring, true);
   assert.strictEqual(body.pool.expiring_soon, '168h');
+
+  // 空权重框 = 不修改，绝不能落成 0（weight 0 = 软摘除；一次保存会把整池摘空 → 全站 503）。
+  const before = requests.filter(r => r.path === 'config').length;
+  acctInputs[2].value = ''; // u-main-0001 的权重被清空
+  await run('savePick()');
+  const cfgs = requests.filter(r => r.path === 'config');
+  assert.strictEqual(cfgs.length, before + 1, '清空后仍应提交一次保存');
+  const b2 = JSON.parse(cfgs[cfgs.length - 1].body);
+  assert.strictEqual(b2.pool.accounts['u-main-0001'].weight, undefined,
+    '空权重必须"不提交"（深合并保持原值），而不是写成 0');
   console.log('PICK PANEL OK');
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });
 `

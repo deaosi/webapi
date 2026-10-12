@@ -461,11 +461,14 @@ type PickGroupStatus struct {
 }
 
 type PickAccountStatus struct {
-	UID      string  `json:"uid"`
-	Weight   float64 `json:"weight_cfg"` // 静态权重（0=软摘除）
-	Priority int     `json:"priority"`   // 生效优先级（组优先）
+	UID string `json:"uid"`
+	// Nickname 账号昵称：面板权重表要显示"是哪个号"，只给 uid 前 8 位运维认不出来
+	// （与账号池主表同一口径：昵称主显 + 短 uid 次显）。
+	Nickname string  `json:"nickname"`
+	Weight   float64 `json:"weight"`   // 静态权重（0 = 软摘除）；缺省 1
+	Priority int     `json:"priority"` // 生效优先级（有分组时取组优先级）
 	Group    string  `json:"group"`
-	WFinal   float64 `json:"w_final"`  // 末次 pick 的 w_base × weight（无 pick 为 0）
+	WFinal   float64 `json:"w_final"`    // 末次 pick 的 w_base × weight（无 pick 为 0）
 	Current  float64 `json:"sw_current"` // SWRR current（weighted 模式恒 0）
 	Picks    uint64  `json:"picks"`
 }
@@ -516,8 +519,12 @@ func (p *Pool) PickPolicyStatus() PickPolicyView {
 		if p.pick.mode == PickSWRR {
 			cur = p.swCurr[uid]
 		}
+		nick := ""
+		if e := p.byUID[uid]; e != nil {
+			nick = e.a.Nickname
+		}
 		v.Accounts = append(v.Accounts, PickAccountStatus{
-			UID: uid, Weight: w, Priority: pri, Group: g,
+			UID: uid, Nickname: nick, Weight: w, Priority: pri, Group: g,
 			WFinal: p.lastW[uid], Current: cur, Picks: p.pickDist[uid],
 		})
 	}

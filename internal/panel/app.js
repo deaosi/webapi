@@ -649,12 +649,20 @@ function renderPick() {
     const pct = tot ? Math.round((r.picks || 0) / tot * 100) : 0;
     const grpOpts = '<option value="">（无）</option>' + groupNames.map(n =>
       '<option value="' + esc(n) + '"' + (r.group === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
-    const wTag = Number(r.weight) === 0 ? ' <span class="tag bad">摘除</span>' : '';
+    // 权重缺省 1：Go 端 weight 为 *float64，nil 时序列化为 1（routeWeight 已解析），
+    // 故 r.weight 恒为数字；仍兜一层，避免老服务端/异常载荷把输入框渲染成空串
+    // （空串会被 savePick 的 Number('') 读成 0 = 软摘除，是个静默灾难）。
+    const wv = Number(r.weight);
+    const weightVal = Number.isFinite(wv) ? wv : 1;
+    const wTag = weightVal === 0 ? ' <span class="tag bad">摘除</span>' : '';
+    const nm = r.nickname
+      ? esc(r.nickname)
+      : '<span style="color:var(--ink-3)">未命名</span>';
     return '<tr title="uid: ' + esc(uid) + '">' +
-      '<td class="who"><div class="nm">' + esc(short) + '</div></td>' +
+      '<td class="who"><div class="nm">' + nm + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td><select class="grp-sel" data-uid="' + esc(uid) + '" data-f="group">' + grpOpts + '</select></td>' +
       '<td><input class="num-sm" type="number" step="1" data-uid="' + esc(uid) + '" data-f="priority" value="' + r.priority + '" aria-label="优先级"></td>' +
-      '<td><input class="num-sm" type="number" step="0.1" min="0" data-uid="' + esc(uid) + '" data-f="weight" value="' + r.weight + '" aria-label="权重">' + wTag + '</td>' +
+      '<td><input class="num-sm" type="number" step="0.1" min="0" data-uid="' + esc(uid) + '" data-f="weight" value="' + weightVal + '" aria-label="权重">' + wTag + '</td>' +
       '<td class="num" title="w_base × weight_cfg">' + (Number(r.w_final || 0).toFixed(2)) + '</td>' +
       '<td class="num">' + (r.picks || 0) + '次</td>' +
       '<td><div class="pick-share" title="' + pct + '%"><i style="width:' + pct + '%"></i></div></td></tr>';
@@ -698,16 +706,22 @@ async function savePick() {
   btn.disabled = true; btn.textContent = '保存中…';
   try {
     // 从 DOM 读回编辑值（账号行按 UID 全串回写；分组行按当前名回写）。
+    // 空输入 = 不修改该项（跳过不提交），**绝不**当作 0：weight 为 0 的语义是"软摘除"，
+    // 一旦把空框读成 0，一次保存就会把整池账号静默摘除（选号返回 nil → 全站 503）。
+    // 深合并保存下"漏提交某键"即保持原值，正是想要的语义。
     const accounts = {};
     document.querySelectorAll('#pickAcctBody [data-uid]').forEach(el => {
       const uid = el.dataset.uid, f = el.dataset.f;
-      accounts[uid] = accounts[uid] || { weight: 1, priority: 0, group: '' };
+      accounts[uid] = accounts[uid] || { priority: 0, group: '' };
+      const raw = String(el.value == null ? '' : el.value).trim();
       if (f === 'weight') {
-        const v = Number(el.value);
+        if (raw === '') return; // 不修改
+        const v = Number(raw);
         if (!Number.isFinite(v) || v < 0) throw new Error('权重必须 ≥0 的数字（' + uid.slice(0, 8) + '）');
         accounts[uid].weight = v;
       } else if (f === 'priority') {
-        const v = Math.trunc(Number(el.value));
+        if (raw === '') return; // 不修改
+        const v = Math.trunc(Number(raw));
         if (!Number.isFinite(v)) throw new Error('优先级必须是整数（' + uid.slice(0, 8) + '）');
         accounts[uid].priority = v;
       } else if (f === 'group') {
@@ -725,12 +739,15 @@ async function savePick() {
       const name = String((nameEl && nameEl.value) || g).trim();
       if (!name) throw new Error('组名不能为空');
       groups[name] = groups[name] || { priority: 0, weight: 1 };
+      const raw = String(el.value == null ? '' : el.value).trim();
       if (f === 'priority') {
-        const v = Math.trunc(Number(el.value));
+        if (raw === '') return; // 不修改
+        const v = Math.trunc(Number(raw));
         if (!Number.isFinite(v)) throw new Error('分组优先级必须是整数（' + name + '）');
         groups[name].priority = v;
       } else if (f === 'weight') {
-        const v = Number(el.value);
+        if (raw === '') return; // 不修改
+        const v = Number(raw);
         if (!Number.isFinite(v) || v <= 0) throw new Error('分组权重必须 >0（' + name + '）');
         groups[name].weight = v;
       }
