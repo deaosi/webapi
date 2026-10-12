@@ -210,16 +210,12 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 		}
 		ws = kept
 	}
-	cands = cands[:0]
+	// candsAll 同层全候选（权重降序）：供最早到期优先与 LRU 兜底在全量范围选最旧者
+	// （避免 top5 字典序截断把等权重靠后账号饿死——惊群根因之一）。
+	// Top5 截断已收进各选择函数内部（swrr/priority 不截断，weighted 取前 5）。
+	candsAll := make([]*entry, 0, len(ws))
 	for _, c := range ws {
-		cands = append(cands, c.e)
-	}
-	// candsAll 保留截断前的全候选（权重降序），供 LRU 兜底在全量范围选最旧者，
-	// 避免 top5 字典序截断把等权重靠后账号饿死（惊群根因之一）。
-	// swrr 模式：全候选 SWRR（不截断 Top5——截断会扭曲权重比例；打散由 SWRR 自带）。
-	candsAll := cands
-	if p.pick.mode == PickWeighted && len(cands) > 5 {
-		cands = cands[:5]
+		candsAll = append(candsAll, c.e)
 	}
 	var e *entry
 	// 最早到期优先（WorkDaddy 口径）：只在成本层内、配置窗口内存在有效批次的账号中
@@ -255,7 +251,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 		}
 	}
 	if e == nil {
-		e = p.selectByMode(ws, cands, candsAll, now)
+		e = p.selectByMode(ws, candsAll, now)
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -333,48 +329,46 @@ func (p *Pool) inFlightFull(e *entry) bool {
 // 生产默认 100ms；纯加权分布测试可临时置 0 关闭防撞号。
 var minPickGap = 100 * time.Millisecond
 
-// pickWeighted 加权随机（claude-api selectWeightedRandom 参考口径）：
+// pickWeightedCands 加权随机抽签：直接使用候选的 w_final（= w_base × weight_cfg），
+// 不在内部重算 credits/idle。
 //
-//		weight = credits 比例 × 10 + idleWeight
+// 为什么必须用 w_final：静态权重（pool.accounts.weight）若只参与 Top5 截断排序、不参与
+// 抽签，则候选数 ≤5 时它完全不影响概率——运营在面板配 9:1，实际分流仍是 50:50（实测踩过）。
+// 同时这也修掉旧实现的口径裂缝：旧 pickWeighted 在**截断后的 top5 子集**里重算 maxCredits，
+// 与截断排序用的全集口径不同源，两阶段权重不可比（原注释要求"共享同一基准"）。
 //
-//	  - credits 比例 = 该号 credits / 候选集内最大 credits（避免量纲爆炸）
-//	  - idleWeight = min(距 lastUsed 小时数 × idleWeightPerHour, idleWeightMax)；从未使用给满分
-//
-// credits 全 0 时仍按 idleWeight 加权（不退化均匀随机）。
-// 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
+// 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变：
+// 注入源返回 0 时必选 eligible[0]，即层内 (单价, w_final) 最优者）。
 // 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
-func (p *Pool) pickWeighted(cands []*entry) *entry {
-	now := time.Now()
-	var maxCredits int64
-	for _, e := range cands {
-		if e.credits > maxCredits {
-			maxCredits = e.credits
-		}
-	}
+func (p *Pool) pickWeightedCands(cands []weightedCand) *entry {
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
 	var total int64
-	for i, e := range cands {
-		w := p.weightOf(e, maxCredits, now)
-		weights[i] = int64(w * scale)
-		total += weights[i]
+	for i, c := range cands {
+		w := int64(c.w * scale)
+		if w < 0 {
+			w = 0 // 负权重（配置层已拦）防御：不参与抽签而非倒扣
+		}
+		weights[i] = w
+		total += w
 	}
 	rnd := rand.Int64N
 	if p.randInt64N != nil {
 		rnd = p.randInt64N
 	}
 	if total <= 0 {
-		return cands[int(rnd(int64(len(cands))))]
+		// 权重全为 0（理论不可达：w_base ≥1）：退化为均匀随机。
+		return cands[int(rnd(int64(len(cands))))].e
 	}
 	r := rnd(total)
 	var acc int64
-	for i, e := range cands {
+	for i, c := range cands {
 		acc += weights[i]
 		if r < acc {
-			return e
+			return c.e
 		}
 	}
-	return cands[len(cands)-1]
+	return cands[len(cands)-1].e
 }
 
 // weightOf 计算单个账号的普通加权分值。

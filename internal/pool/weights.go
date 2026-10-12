@@ -211,29 +211,38 @@ type weightedCand struct {
 }
 
 // selectByMode 按 pick.mode 在同层候选中选择（调用方已持 pick 写锁）。
-// cands: weighted 模式 Top5 / 其他模式全量（权重降序）；candsAll: 全量（权重降序）。
+// ws 已按 (单价, w_final, uid) 降序；candsAll 为同层全候选（权重降序，供 LRU/到期优先）。
 // now: 本次 pick 时刻（minPickGap 判定用）。w_final 随 weightedCand 携带，无需另传表。
-func (p *Pool) selectByMode(ws []weightedCand, cands, candsAll []*entry, now time.Time) *entry {
+func (p *Pool) selectByMode(ws []weightedCand, candsAll []*entry, now time.Time) *entry {
 	switch p.pick.mode {
 	case PickSWRR:
 		return p.selectSWRR(ws)
 	case PickPriority:
 		return p.selectPriority(ws, now)
 	default:
-		return p.selectWeightedLegacy(cands, candsAll, now)
+		return p.selectWeightedLegacy(ws, candsAll, now)
 	}
 }
 
-// selectWeightedLegacy 现状选择：minPickGap 过滤 Top5 → pickWeighted；
-// 全被刚用过 → 全量 LRU（usedSeq）。与改前 pick.go 选择段逐行同义。
-func (p *Pool) selectWeightedLegacy(cands, candsAll []*entry, now time.Time) *entry {
-	eligible := make([]*entry, 0, len(cands))
-	for _, c := range cands {
-		if now.Sub(c.lastUsed) >= minPickGap {
+// selectWeightedLegacy 现状选择：按 (单价, w_final) 降序取 Top5 → minPickGap 过滤 →
+// 加权随机（w_final 含静态权重乘子）；top5 全被刚用过 → 同层全量 LRU（usedSeq）。
+// 与改前逐行同义，只多了静态权重乘子进入抽签权重。
+func (p *Pool) selectWeightedLegacy(ws []weightedCand, candsAll []*entry, now time.Time) *entry {
+	top := ws
+	if len(top) > 5 {
+		top = top[:5]
+	}
+	eligible := make([]weightedCand, 0, len(top))
+	for _, c := range top {
+		if now.Sub(c.e.lastUsed) >= minPickGap {
 			eligible = append(eligible, c)
 		}
 	}
 	if len(eligible) == 0 {
+		// top5 全部刚被用过：LRU 兜底，在**全候选 candsAll**（非仅 top5）里选最旧者。
+		// 用 usedSeq 单调序号而非 lastUsed 墙钟比较：Windows 等平台 time.Now() 精度
+		// ~0.5ms，快速连续选号时所有 lastUsed 完全相等，Before 全 false 会恒选
+		// candsAll[0] 导致集中。usedSeq 严格全序，与时间精度无关。
 		e := candsAll[0]
 		for _, c := range candsAll[1:] {
 			if c.usedSeq < e.usedSeq {
@@ -242,7 +251,7 @@ func (p *Pool) selectWeightedLegacy(cands, candsAll []*entry, now time.Time) *en
 		}
 		return e
 	}
-	return p.pickWeighted(eligible)
+	return p.pickWeightedCands(eligible)
 }
 
 // selectSWRR 全候选平滑加权轮询：不截断、不看 minPickGap（SWRR 自带打散；
@@ -303,7 +312,8 @@ func (p *Pool) selectInner(members []weightedCand, now time.Time) *entry {
 	if p.pick.inner == PickInnerSWRR {
 		return p.selectSWRR(members)
 	}
-	// weighted：成员按 w_final 降序取 Top5（成员不足 5 全取），minPickGap + pickWeighted + LRU。
+	// weighted：成员按 w_final 降序取 Top5（成员不足 5 全取），minPickGap 过滤 →
+	// w_final 加权抽签；组内全被刚用过 → 组内 LRU（usedSeq），不跨组抢（跨组=越级，违背 priority）。
 	sort.SliceStable(members, func(i, j int) bool {
 		if members[i].w != members[j].w {
 			return members[i].w > members[j].w
@@ -314,18 +324,13 @@ func (p *Pool) selectInner(members []weightedCand, now time.Time) *entry {
 	if len(top) > 5 {
 		top = top[:5]
 	}
-	el := make([]*entry, 0, len(top))
-	for _, m := range top {
-		el = append(el, m.e)
-	}
-	eligible := make([]*entry, 0, len(el))
-	for _, c := range el {
-		if now.Sub(c.lastUsed) >= minPickGap {
+	eligible := make([]weightedCand, 0, len(top))
+	for _, c := range top {
+		if now.Sub(c.e.lastUsed) >= minPickGap {
 			eligible = append(eligible, c)
 		}
 	}
 	if len(eligible) == 0 {
-		// 组内全被刚用过：组内 LRU（usedSeq），不跨组抢（跨组=越级，违背 priority）。
 		e := members[0].e
 		for _, m := range members[1:] {
 			if m.e.usedSeq < e.usedSeq {
@@ -334,7 +339,7 @@ func (p *Pool) selectInner(members []weightedCand, now time.Time) *entry {
 		}
 		return e
 	}
-	return p.pickWeighted(eligible)
+	return p.pickWeightedCands(eligible)
 }
 
 // --- Pool 上的策略状态（运行态，不持久化）---

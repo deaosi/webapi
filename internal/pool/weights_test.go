@@ -34,8 +34,24 @@ func TestSWRRRatio(t *testing.T) {
 	}
 }
 
-// 权重全 1 的 swrr 退化为严格 RR：ABAB 交替（2 号场景）。
-func TestSWRRDegradesToRR(t *testing.T) {
+// swrrPick 纯函数：入参等权且 current 全 0 时要严格交替（算法本身的 RR 性质）。
+func TestSWRRPickAlternatesEqualWeights(t *testing.T) {
+	weights := []float64{1, 1}
+	curr := []float64{0, 0}
+	want := []int{0, 1, 0, 1, 0, 1}
+	for i, w := range want {
+		if got := swrrPick(weights, curr); got != w {
+			t.Fatalf("等权 SWRR 第 %d 步应选 %d，实得 %d（current=%v）", i, w, got, curr)
+		}
+	}
+}
+
+// 集成：等静态权重下分流应均衡。
+//
+// 不能断言严格交替：weightOf 含动态项（credits 比例 + 闲置补偿），每次 pick 后选中号的
+// lastUsed 被刷新 → 其 idle 补偿归零，两号 w_final 每轮都在变（首次 11:11，之后 11:16…）。
+// 严格 RR 只在**算法入参等权**时成立（上一条纯函数测试覆盖），集成层只保证均衡。
+func TestSWRRBalancedWithEqualStaticWeights(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u-a"})
@@ -45,13 +61,16 @@ func TestSWRRDegradesToRR(t *testing.T) {
 	if err := p.SetPickPolicy(PickSWRR, PickInnerWeighted, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	seq := ""
-	for i := 0; i < 6; i++ {
-		seq += p.Pick().UID + " "
+	seen := map[string]int{}
+	for i := 0; i < 200; i++ {
+		seen[p.Pick().UID]++
 	}
-	// 严格交替（起点不定，两种交替都接受）。
-	if seq != "u-a u-b u-a u-b u-a u-b " && seq != "u-b u-a u-b u-a u-b u-a " {
-		t.Errorf("swrr 等权应严格交替: %q", seq)
+	a, b := seen["u-a"], seen["u-b"]
+	if a+b != 200 {
+		t.Fatalf("计数异常: %v", seen)
+	}
+	if a < 60 || a > 140 || b < 60 || b > 140 {
+		t.Errorf("等权 SWRR 分流应均衡（各 60-140）: a=%d b=%d", a, b)
 	}
 }
 
