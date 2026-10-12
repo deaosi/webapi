@@ -57,6 +57,11 @@ type Config struct {
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
 
+	// FetchUpstreamModels 拉取某渠道上游端点的模型 id 列表（渠道页"拉取上游模型"按钮用：
+	// 外部上游的可用模型只有上游自己知道，让运维手抄模型名极易写错）。nil 时端点返回 501。
+	// 由 main 注入——它持有 channels 配置与上游密钥，面板包不反向依赖 cmd/server。
+	FetchUpstreamModels func(channel string) ([]string, error)
+
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
@@ -185,6 +190,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/pick", p.withAuth(p.pickPolicy))
 	p.mux.HandleFunc("POST /panel/api/pick/stats/reset", p.withAuth(p.resetPickStats))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
+	p.mux.HandleFunc("POST /panel/api/channels/upstream_models", p.withAuth(p.channelUpstreamModels))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	p.mux.HandleFunc("GET /panel/api/api_keys", p.withAuth(p.listAPIKeys))

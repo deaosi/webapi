@@ -7,10 +7,17 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -128,18 +135,104 @@ func isStreamResponse(ct string) bool {
 	return strings.Contains(ct, "text/event-stream") || strings.Contains(ct, "application/x-ndjson")
 }
 
-// externalChannelModels 为外部上游渠道合成 /v1/models 列表。
+// ── 上游模型表（带缓存）──
 //
-// 为什么不能用池子目录（h.modelList()）：那个目录是 WorkBuddy 账号池的模型，与外部
-// 上游的模型世界无关，列出来只会让客户端选到必然被上游拒绝的名字。
-// 渠道白名单才是"这个 key 真正能调的模型"——白名单为空表示不限，此时列表留空并
-// 由客户端自行指定模型（网关无法凭空得知上游有哪些模型；盲目探测会浪费上游额度）。
+// 为什么需要：白名单留空的外部渠道"全部走外部上游"，此时这个 key 到底能调哪些模型
+// 只有上游知道；面板也需要它来帮用户填白名单（否则得去翻上游文档抄模型名）。
+//
+// 为什么缓存：/v1/models 是客户端启动时的高频调用，每个请求都去上游拉一次既慢又会
+// 触发上游限流；模型表变化很慢，5 分钟足够新。缓存键是「基址+密钥指纹」，改配置后
+// 自动失效（不会拿旧上游的模型表糊弄新上游）。
+var (
+	upstreamModelMu    sync.Mutex
+	upstreamModelCache = map[string]upstreamModelEntry{}
+)
+
+type upstreamModelEntry struct {
+	ids []string
+	at  time.Time
+}
+
+// upstreamModelTTL 上游模型表缓存时长。
+const upstreamModelTTL = 5 * time.Minute
+
+// FetchUpstreamModelIDs 拉取上游的模型 id 列表（GET <base>/models），带 5 分钟缓存。
+//
+// 供 /v1/models 与面板"拉取上游模型"共用。任何失败都原样返回 error，由调用方决定
+// 降级策略（网关侧退回池子目录，面板侧提示用户手填）——这里不吞错、不返回空成功。
+func FetchUpstreamModelIDs(base, key, label string) ([]string, error) {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return nil, errors.New("upstream url is empty")
+	}
+	// 密钥只参与指纹，不进缓存值：避免把上游密钥留在缓存结构里被日志/转储带出。
+	sum := sha256.Sum256([]byte(base + "\x1f" + key))
+	ck := hex.EncodeToString(sum[:])
+
+	upstreamModelMu.Lock()
+	if e, ok := upstreamModelCache[ck]; ok && time.Since(e.at) < upstreamModelTTL {
+		ids := e.ids
+		upstreamModelMu.Unlock()
+		return ids, nil
+	}
+	upstreamModelMu.Unlock()
+
+	req, err := http.NewRequest(http.MethodGet, base+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MiB 上限：模型表不该更大
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("upstream %s/modes: HTTP %d: %s", label, resp.StatusCode,
+			strings.TrimSpace(string(body))[:min(len(body), 200)])
+	}
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("upstream %s/models: 响应不是 OpenAI 模型表格式: %w", label, err)
+	}
+	ids := make([]string, 0, len(parsed.Data))
+	for _, m := range parsed.Data {
+		if id := strings.TrimSpace(m.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+
+	upstreamModelMu.Lock()
+	if len(upstreamModelCache) > 64 { // 渠道数有界，但防御性清理
+		upstreamModelCache = map[string]upstreamModelEntry{}
+	}
+	upstreamModelCache[ck] = upstreamModelEntry{ids: ids, at: time.Now()}
+	upstreamModelMu.Unlock()
+	return ids, nil
+}
+
+// externalChannelModels 为外部上游渠道合成"白名单里的具体模型"条目。
+//
+// 只列具体名字：通配条目（`glm-5*`）不是某个模型，列出去客户端也无法直接调用；
+// 白名单留空时返回空（调用方改为拉上游模型表）。
 func externalChannelModels(ch ChannelInfo) []map[string]any {
 	out := make([]map[string]any, 0, len(ch.Models))
 	for _, m := range ch.Models {
 		m = strings.TrimSpace(m)
 		if m == "" || strings.HasSuffix(m, "*") {
-			continue // 通配条目不是具体模型，不进列表（列表只能给确定名字）
+			continue
 		}
 		// 外部上游的模型名不带本网关的 realm 前缀：前缀是内部路由协议，
 		// 上游与客户端都不认。id 用裸名，与 chat 侧出站口径一致。

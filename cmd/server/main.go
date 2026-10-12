@@ -302,6 +302,19 @@ func main() {
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch, chRouter)
 		},
+		// 渠道页"拉取上游模型"：外部上游的可用模型只有上游自己知道，让运维手抄模型名
+		// 必然拼错。这里按渠道名间接取地址与密钥（面板不能自己传 URL/key，否则它就是
+		// 一个人人可用的任意抓取器），失败原因原样回给面板显示。
+		FetchUpstreamModels: func(name string) ([]string, error) {
+			def, ok := chRouter.defByName(name)
+			if !ok {
+				return nil, fmt.Errorf("渠道 %q 不存在（可能刚被删除，刷新后重试）", name)
+			}
+			if !def.IsExternal() {
+				return nil, fmt.Errorf("渠道 %q 不是外部上游渠道（未填请求地址）", name)
+			}
+			return server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label)
+		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。

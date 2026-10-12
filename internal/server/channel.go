@@ -65,6 +65,18 @@ func FilterChannelModels(list []map[string]any, ch ChannelInfo) []map[string]any
 	return out
 }
 
+// ChannelServesModel 报告**外部上游渠道**是否承接这个模型（决定走上游还是回落账号池）。
+//
+// 与 ChannelAllowedModel 的区别在语义而非实现：后者是"是否放行"（不匹配即拒绝），
+// 前者是"归谁服务"（不匹配就交给账号池）。绑定外部渠道的 key 因此可以同时用到
+// 两类模型：白名单内的走外部上游，其余继续走 WorkBuddy 账号池。
+//
+// 空名单 = 全部承接（该渠道独占，请求一律转发，不回落账号池）——保留既有配置语义，
+// 也避免"白名单没填就以为没生效"。
+func ChannelServesModel(models []string, bare string) bool {
+	return ChannelAllowedModel(models, bare)
+}
+
 // ChannelAllowedModel 报告裸模型名是否落在渠道白名单内（空名单 = 全放开）。
 //
 // 匹配口径（大小写敏感，与模型名一致）：

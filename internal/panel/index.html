@@ -311,6 +311,12 @@ h4.sub-h .grow { flex: 1; }
 .pick-share > i { display: block; height: 100%; background: var(--accent); }
 /* 剩余配额段：同一根条里"已消耗(深)/配额(浅)"对照，配置权重直观可见 */
 .pick-share > b { display: block; height: 100%; background: color-mix(in srgb, var(--accent) 32%, transparent); }
+/* 上游模型候选：紧凑标签，点一下加入/移出白名单 */
+.ch-models { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.ch-models > span { font: 500 11px/1 ui-monospace, monospace; padding: 4px 7px; border-radius: 4px;
+  border: 1px solid var(--line); background: var(--surface-2); cursor: pointer; user-select: none; }
+.ch-models > span:hover { border-color: var(--accent); }
+.ch-models > span.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 input.num-sm { width: 76px; }
 select.grp-sel { max-width: 130px; }
 .switch { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; }
@@ -1004,8 +1010,14 @@ select.grp-sel { max-width: 130px; }
           </div>
 
           <label class="fld"><span class="lb">模型白名单（逗号分隔）</span>
-            <input id="chEditModels" placeholder="留空=不限，可 glm-5*" autocomplete="off">
-            <span class="hint">外部上游：留空表示不限（列表留空、由客户端指定）；填了就只放行这些模型</span></label>
+            <input id="chEditModels" placeholder="留空=全部走外部上游；可 glm-5*" autocomplete="off">
+            <span class="hint" id="chEditModelsHint">这些模型走外部上游，<strong>未列出的仍走账号池</strong>
+              ——两组模型可以同时用。留空 = 全部走外部上游（此时池子模型不可用）。</span></label>
+          <div class="fld" id="chEditFetchRow" hidden>
+            <button type="button" class="xs" id="chEditFetchBtn" data-act="chfetch-models">拉取上游模型</button>
+            <span class="hint" id="chEditFetchNote">从上游 /models 拉当前可用模型（点一个加入白名单）</span>
+            <div id="chEditFetchList" class="ch-models"></div>
+          </div>
 
           <div class="grid2">
             <label class="fld"><span class="lb">优先级（越小越先消耗）</span>

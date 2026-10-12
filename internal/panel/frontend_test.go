@@ -390,7 +390,11 @@ const nodes = new Map();
 function element() {
   return { value: '', textContent: '', innerHTML: '', hidden: false, disabled: false,
     dataset: {}, children: [], isConnected: true,
-    classList: { add() {}, remove() {}, toggle() {} },
+    // classList 真实记录状态：弹窗开合就是 class 增删，空实现会让"保存后应自动关闭"这类断言永远为真（测不出 bug）。
+    classList: { _s: new Set(),
+      add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
+      toggle(c) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); },
+      contains(c) { return this._s.has(c); }, has(c) { return this._s.has(c); } },
     focus() {}, select() {}, addEventListener() {}, appendChild() {}, remove() {},
     querySelectorAll: () => [] };
 }
@@ -527,7 +531,11 @@ const nodes = new Map();
 function element() {
   return { value: '', textContent: '', innerHTML: '', hidden: false, disabled: false,
     dataset: {}, children: [], isConnected: true,
-    classList: { add() {}, remove() {}, toggle() {} },
+    // classList 真实记录状态：弹窗开合就是 class 增删，空实现会让"保存后应自动关闭"这类断言永远为真（测不出 bug）。
+    classList: { _s: new Set(),
+      add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
+      toggle(c) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); },
+      contains(c) { return this._s.has(c); }, has(c) { return this._s.has(c); } },
     focus() {}, select() {}, addEventListener() {}, appendChild() {}, remove() {},
     querySelectorAll: () => [], closest: () => null };
 }
@@ -653,6 +661,9 @@ run('api = mockAPI');
   const ab = JSON.parse(aposts[2].body);
   assert.strictEqual(ab.pool.accounts['u-back-0002'].weight, 2, '账号弹窗只改该账号');
   assert.strictEqual(ab.pool.accounts['u-back-0002'].group, 'main');
+  // 保存成功后弹窗必须自动关闭：closeEditModal 的 saving 守卫会吞掉程序化关闭
+  // （saving 要到 finally 才复位），曾导致"点了保存窗口还杵在那"。
+  assert(get('editVeil').classList.has('on') === false, '账号弹窗保存后应自动关闭');
   console.log('PICK PANEL OK');
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });
 `
@@ -688,7 +699,11 @@ const nodes = new Map();
 function element() {
   return { value: '', textContent: '', innerHTML: '', hidden: false, disabled: false,
     dataset: {}, children: [], isConnected: true,
-    classList: { add() {}, remove() {}, toggle() {} },
+    // classList 真实记录状态：弹窗开合就是 class 增删，空实现会让"保存后应自动关闭"这类断言永远为真（测不出 bug）。
+    classList: { _s: new Set(),
+      add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
+      toggle(c) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); },
+      contains(c) { return this._s.has(c); }, has(c) { return this._s.has(c); } },
     focus() {}, select() {}, addEventListener() {}, appendChild() {}, remove() {},
     querySelectorAll: () => [], querySelector: () => null,
     closest: () => null };
@@ -821,6 +836,11 @@ run('api = mockAPI');
   const kbPost = JSON.parse(posts[posts.length - 1].body);
   assert.strictEqual(kbPost.channels.keys['key-2'], 'main', '绑定弹窗只动该 key');
   assert.strictEqual(kbPost.channels.keys['key-1'], 'main', '整段带回：既有绑定不能丢');
+  // 保存成功后弹窗必须自动关闭：closeChEditModal 的 saving 守卫会吞掉程序化关闭
+  // （saving 要到 finally 才复位），曾导致"点了保存窗口还杵在那"。这里直接断言结果为 off。
+  assert(get('chEditVeil').classList.has('on') === false, '渠道弹窗保存后应自动关闭');
+  assert(get('keyBindVeil').classList.has('on') === false, '绑定弹窗保存后应自动关闭');
+  // 取消按钮仍受"保存中不许关"保护：非 force 路径不该能关掉正在保存的弹窗。
   console.log('CHANNELS PANEL OK');
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });
 `

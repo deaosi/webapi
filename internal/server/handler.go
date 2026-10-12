@@ -321,14 +321,31 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	if keyID != "" && h.cfg.APIKeys != nil {
 		h.cfg.APIKeys.TouchUsage(keyID, "")
 	}
-	// 外部上游渠道：这个 key 的模型世界就是渠道白名单（上游端点由渠道指定，
-	// 池子目录与它无关），直接按白名单合成列表，避免客户端选到必然被拒的名字。
+	// 外部上游渠道：这个 key 能调的模型是**两组之和**——
+	//   池子目录（未命中白名单时回落到账号池）+ 该渠道白名单里的具体模型。
+	// 先前只列白名单是"独占"语义的产物，会让客户端看不到仍可用的池子模型。
 	if h.cfg.ChannelOfKey != nil && keyID != "" {
 		if ch, bound := h.cfg.ChannelOfKey(keyID); bound && ch.IsExternal() {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"object": "list",
-				"data":   externalChannelModels(ch),
-			})
+			list := h.modelList()
+			if len(ch.Models) == 0 {
+				// 白名单留空 = 全部走外部上游，此时可用模型由上游决定：
+				// 拉上游 /models（带缓存，失败则退回池子目录，不影响可用性）。
+				if base, key := ch.UpstreamURL, ch.UpstreamKey; base != "" {
+					if ids, err := FetchUpstreamModelIDs(base, key, ch.Label); err == nil && len(ids) > 0 {
+						// 显式新建而不是 list[:0] 复用：modelList() 目前每次新建切片，
+						// 复用"暂时"安全，但一旦它将来带上缓存就会就地改写共享数组。
+						list = make([]map[string]any, 0, len(ids))
+						for _, id := range ids {
+							list = append(list, map[string]any{
+								"id": id, "object": "model", "created": 1753600000, "owned_by": ch.Label,
+							})
+						}
+					}
+				}
+			} else {
+				list = append(list, externalChannelModels(ch)...)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
 			return
 		}
 	}
@@ -620,13 +637,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					"model "+bareModel+" is not allowed for this API key")
 				return
 			}
-			// 外部上游渠道：请求转发到该渠道配置的上游端点，不走账号池。
-			// 必须放在选号之前——外部上游没有"账号/积分/选号"的概念，走池子毫无意义。
+			// 外部上游渠道：按**模型**分流，而不是整条 key 独占——
+			//   命中该渠道白名单 → 转发到上游端点（不进账号池、不消耗账号积分）；
+			//   未命中           → 回落账号池，池子原有模型照常可用。
+			// 这样"绑定渠道"是给这个 key **增加**一组可用模型，而不是替换掉原有能力。
+			//
+			// 回落时刻意**不设** channelScope：外部渠道是上游端点，没有"池成员分组"
+			// 概念（它的分组名在 pool.groups 里通常没有成员），设了会把回落请求
+			// 逼进一个空分组、直接 no_healthy_account。
 			if ch.IsExternal() {
-				proxyToUpstream(w, r, ch, body, bareModel)
-				return
+				if ChannelServesModel(ch.Models, bareModel) {
+					proxyToUpstream(w, r, ch, body, bareModel)
+					return
+				}
+			} else {
+				channelScope = ch.Group
 			}
-			channelScope = ch.Group
 		}
 	}
 	modelRate := ""

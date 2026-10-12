@@ -826,9 +826,12 @@ function suggestGroupName(list) {
   while (names.has(name)) { i++; name = 'group' + i; }
   return name;
 }
-function closeEditModal(restoreFocus) {
+// closeEditModal 关闭弹窗。force=true 用于保存成功后的程序化关闭——此时 saving
+// 仍为 true（finally 还没跑），不加 force 会被下面这行守卫吞掉、弹窗停在原地。
+// 遮罩 / Esc / 取消 走 force=false，保留"保存中不许关"的保护。
+function closeEditModal(restoreFocus, force) {
   if (restoreFocus === undefined) restoreFocus = true;
-  if (editState.saving) return;
+  if (editState.saving && !force) return;
   editState.modalOpen = false; editState.kind = ''; editState.uid = ''; editState.name = '';
   $('editModalError').hidden = true; $('editModalError').textContent = '';
   closeVeil('editVeil');
@@ -855,7 +858,7 @@ async function editSubmit() {
         ensureChannelDef(state, name);
       });
       toast('分组「' + name + '」已保存', 'ok');
-      closeEditModal(false);
+      closeEditModal(false, true);
       loadOverview(true);
     } catch (e) { fail(e.message); toast('保存失败：' + e.message, 'err'); }
     finally { editState.saving = false; $('editSave').disabled = false; $('editSave').textContent = '保存'; }
@@ -874,7 +877,7 @@ async function editSubmit() {
         state.accounts[uid] = { priority: pri, weight: w, group: g };
       });
       toast('账号权重已保存', 'ok');
-      closeEditModal(false);
+      closeEditModal(false, true);
       loadOverview(true);
     } catch (e) { fail(e.message); toast('保存失败：' + e.message, 'err'); }
     finally { editState.saving = false; $('editSave').disabled = false; $('editSave').textContent = '保存'; }
@@ -2805,6 +2808,7 @@ function chEditModal(mode, name) {
   $('chEditUpstreamKey').value = '';
   $('chEditUpstreamKey').placeholder = isExt ? '已保存，留空表示不修改' : 'sk-...';
   $('chEditUpstreamType').value = (row && row.upstream_type) || 'openai';
+  chEditClearFetched();
   chEditToggleKind();
   // 路由属性（优先级/权重）在 pool.groups，渠道弹窗里一并可改。
   const route = (mode === 'edit' && chState.route[name]) || {};
@@ -2830,6 +2834,67 @@ function chEditToggleKind() {
   // realm 只对账号池渠道有意义（选号域过滤）；外部上游的"域"由上游地址决定。
   const realmEl = $('chEditRealm');
   if (realmEl) { realmEl.closest('label').hidden = isExt; }
+  // 拉取上游模型只对外部渠道有意义；切到账号池就收起来并清掉候选（避免误当成池子模型）。
+  const fetchRow = $('chEditFetchRow');
+  if (fetchRow) fetchRow.hidden = !isExt;
+  if (!isExt) chEditClearFetched();
+}
+
+// ── 拉取上游模型（帮助填写白名单：外部上游有哪些模型只有上游自己知道）──
+// 候选标签点一下即加入/移出白名单输入框；输入框始终是唯一事实来源，
+// 保存时仍只读输入框的值，所以候选区与保存逻辑不耦合、也不会"看起来选了却没保存"。
+function chEditClearFetched() {
+  const box = $('chEditFetchList');
+  if (box) box.innerHTML = '';
+  const note = $('chEditFetchNote');
+  if (note) note.textContent = '从上游 /models 拉当前可用模型（点一个加入白名单）';
+}
+
+function chEditModelTokens() {
+  return String(($('chEditModels') || {}).value || '')
+    .split(',').map(x => x.trim()).filter(Boolean);
+}
+
+function chEditRenderFetched(ids) {
+  const box = $('chEditFetchList');
+  if (!box) return;
+  const on = new Set(chEditModelTokens());
+  box.innerHTML = ids.map(id =>
+    '<span data-act="chfetch-toggle" data-m="' + esc(id) + '"' +
+    (on.has(id) ? ' class="on"' : '') + '>' + esc(id) + '</span>').join('');
+}
+
+function chEditToggleFetched(id) {
+  const cur = chEditModelTokens();
+  const i = cur.indexOf(id);
+  if (i >= 0) cur.splice(i, 1); else cur.push(id);
+  $('chEditModels').value = cur.join(', ');
+  chEditRenderFetched(Array.from($('chEditFetchList').children).map(el => el.dataset.m));
+}
+
+async function chEditFetchModels() {
+  const btn = $('chEditFetchBtn');
+  const note = $('chEditFetchNote');
+  const isCreate = !$('chEditName').disabled;
+  const name = isCreate ? '' : chEditState.name;
+  // 新建渠道还没保存，服务端不知道它的地址 → 只能先在编辑态拉取。
+  if (!name) {
+    note.textContent = '请先保存该渠道，之后在「编辑」里拉取上游模型';
+    return;
+  }
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '拉取中…';
+  note.textContent = '正在向上游拉取…';
+  try {
+    const r = await api('channels/upstream_models', {
+      method: 'POST', body: JSON.stringify({ channel: name }),
+    });
+    const ids = (r && r.models) || [];
+    if (!ids.length) { note.textContent = '上游没有返回任何模型（检查地址是否含 /v1）'; return; }
+    note.textContent = '上游可用 ' + ids.length + ' 个模型，点标签加入/移出白名单：';
+    chEditRenderFetched(ids);
+  } catch (e) {
+    note.textContent = '拉取失败：' + e.message;
+  } finally { btn.disabled = false; btn.textContent = old; }
 }
 
 // chEditRenderMembers 在渠道弹窗里显示成员账号（昵称优先）与引导文案。
@@ -2857,9 +2922,9 @@ function suggestChannelName() {
   while (chState.defs[name]) { i++; name = 'channel' + i; }
   return name;
 }
-function closeChEditModal(restoreFocus) {
+function closeChEditModal(restoreFocus, force) {
   if (restoreFocus === undefined) restoreFocus = true;
-  if (chEditState.saving) return;
+  if (chEditState.saving && !force) return;
   chEditState.modalOpen = false; chEditState.mode = ''; chEditState.name = '';
   chEditErr('');
   $('chEditVeil').classList.remove('on');
@@ -2913,7 +2978,7 @@ async function chEditSubmit() {
       state.groups[name] = { priority: pri, weight: w };
     });
     toast('渠道「' + name + '」已保存', 'ok');
-    closeChEditModal(false);
+    closeChEditModal(false, true);
     await loadChannels();
   } catch (e) { chEditErr(e.message); toast('保存失败：' + e.message, 'err'); }
   finally { chEditState.saving = false; $('chEditSave').disabled = false; $('chEditSave').textContent = '保存'; }
@@ -2947,9 +3012,9 @@ function keyBindModal(id) {
   $('keyBindVeil').classList.add('on');
   $('keyBindSel').focus();
 }
-function closeKeyBindModal(restoreFocus) {
+function closeKeyBindModal(restoreFocus, force) {
   if (restoreFocus === undefined) restoreFocus = true;
-  if (keyBindState.saving) return;
+  if (keyBindState.saving && !force) return;
   keyBindState.modalOpen = false; keyBindState.id = '';
   keyBindErr('');
   $('keyBindVeil').classList.remove('on');
@@ -2969,7 +3034,7 @@ async function keyBindSubmit() {
       else delete state.chKeys[id];
     });
     toast(g ? '已绑定到「' + g + '」' : '已解绑，全池可用', 'ok');
-    closeKeyBindModal(false);
+    closeKeyBindModal(false, true);
     await loadChannels();
   } catch (e) { keyBindErr(e.message); toast('保存失败：' + e.message, 'err'); }
   finally { keyBindState.saving = false; $('keyBindSave').disabled = false; $('keyBindSave').textContent = '保存'; }
@@ -3013,6 +3078,8 @@ document.addEventListener('click', ev => {
   if (act === 'ch-edit') { chEditModal('edit', b.dataset.g); return; }
   if (act === 'ch-del') { chDelete(b.dataset.g); return; }
   if (act === 'key-bind') { keyBindModal(b.dataset.id); return; }
+  if (act === 'chfetch-models') { chEditFetchModels(); return; }
+  if (act === 'chfetch-toggle') { chEditToggleFetched(b.dataset.m); return; }
   if (act === 'chedit-save') { chEditSubmit(); return; }
   if (act === 'chedit-cancel') { closeChEditModal(); return; }
   if (act === 'keybind-save') { keyBindSubmit(); return; }

@@ -173,6 +173,23 @@ type channelRouter struct {
 	refreshedAt time.Time
 }
 
+// defByName 按渠道名取定义（渠道页"拉取上游模型"用：拿该渠道的上游地址与密钥）。
+//
+// 读的是最近一次 Set 的原样配置：与运行期路由同源，避免"面板看到的"和"请求真正走的"
+// 因为读了两份配置而不一致。
+func (r *channelRouter) defByName(name string) (ChannelDef, bool) {
+	if r == nil || name == "" {
+		return ChannelDef{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.last == nil {
+		return ChannelDef{}, false
+	}
+	def, ok := r.last.Groups[name]
+	return def, ok
+}
+
 func newChannelRouter(ch *Channels, store *apikeys.Store) *channelRouter {
 	r := &channelRouter{store: store}
 	r.Set(ch)
