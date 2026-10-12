@@ -321,6 +321,17 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	if keyID != "" && h.cfg.APIKeys != nil {
 		h.cfg.APIKeys.TouchUsage(keyID, "")
 	}
+	// 外部上游渠道：这个 key 的模型世界就是渠道白名单（上游端点由渠道指定，
+	// 池子目录与它无关），直接按白名单合成列表，避免客户端选到必然被拒的名字。
+	if h.cfg.ChannelOfKey != nil && keyID != "" {
+		if ch, bound := h.cfg.ChannelOfKey(keyID); bound && ch.IsExternal() {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"object": "list",
+				"data":   externalChannelModels(ch),
+			})
+			return
+		}
+	}
 	list := h.modelList()
 	// 渠道约束（realm + 白名单）：只列该 key 真正能调的模型，与 chatCompletions 的
 	// 拒绝规则同源——不然客户端从列表里选到一个必然 403 的名字。
@@ -607,6 +618,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if !ChannelAllowedModel(ch.Models, bareModel) {
 				writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
 					"model "+bareModel+" is not allowed for this API key")
+				return
+			}
+			// 外部上游渠道：请求转发到该渠道配置的上游端点，不走账号池。
+			// 必须放在选号之前——外部上游没有"账号/积分/选号"的概念，走池子毫无意义。
+			if ch.IsExternal() {
+				proxyToUpstream(w, r, ch, body, bareModel)
 				return
 			}
 			channelScope = ch.Group

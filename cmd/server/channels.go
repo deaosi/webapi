@@ -1,8 +1,11 @@
 // 上游渠道（NewAPI 口径）：config.channels 的定义、校验与运行期解析。
 //
-// 渠道 = 一个账号分组 + 该组的上游属性（realm / 模型白名单 / 启停）；成员账号由
-// pool.accounts[uid].group 决定（与「账号池·分组」列、pool.groups 共用同一套分组名）。
-// 调用密钥绑定分组后，请求只走同组账号——严格隔离，不跨组借号。
+// NewAPI 里「渠道」就是一个**上游端点**（base_url + key + 模型），调用密钥按分组匹配到
+// 渠道，请求直接转发给该上游。本网关支持两种渠道：
+//   - upstream_url 为空：走账号池（WorkBuddy 账号），按分组隔离选号（原有语义）；
+//   - upstream_url 非空：外部 OpenAI 兼容端点，请求**原样转发**到该 URL，
+//     Authorization 换成该渠道的 upstream_key，不走账号池、不消耗账号积分。
+// 两种都由 channels.keys 的"调用密钥 → 渠道"绑定驱动，同一套隔离与热生效机制。
 //
 // server 包只认 server.ChannelInfo 与 server.ChannelResolver，本文件负责把 config 映射
 // 过去，并处理"配置热生效"（saveConfig 后重建解析表，无需重启）。
@@ -10,6 +13,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -31,7 +35,20 @@ type ChannelDef struct {
 	// Enabled 渠道启停。指针以区分"未配置"（nil → 启用）与显式 false（停用，
 	// 该组所有 key 直接 403）。缺省即启用——漏配一个键不该把整组 key 断流。
 	Enabled *bool `json:"enabled"`
+
+	// ── 上游接入（填了就是外部上游渠道，不填就是账号池分组渠道）──
+	// UpstreamURL 上游 OpenAI 兼容端点基址，如 "https://api.deepseek.com/v1"。
+	// 非空时该渠道的请求转发到 "<UpstreamURL>/chat/completions"，不再走账号池。
+	UpstreamURL string `json:"upstream_url"`
+	// UpstreamKey 上游鉴权密钥（转发时替换 Authorization；/status 与面板列表脱敏展示）。
+	UpstreamKey string `json:"upstream_key"`
+	// UpstreamType 上游协议："" 或 "openai" = OpenAI 兼容（当前唯一实现）。
+	// 预留枚举位，避免将来加 Claude/Gemini 原生协议时改结构。
+	UpstreamType string `json:"upstream_type"`
 }
+
+// IsExternal 该渠道是否为外部上游（填了 upstream_url）。
+func (d ChannelDef) IsExternal() bool { return strings.TrimSpace(d.UpstreamURL) != "" }
 
 // EnabledOn 渠道是否启用（nil = 启用）。
 func (d ChannelDef) EnabledOn() bool { return d.Enabled == nil || *d.Enabled }
@@ -84,6 +101,28 @@ func normalizeChannels(ch *Channels) error {
 		}
 		sort.Strings(cleaned)
 		def.Models = cleaned
+		// 上游接入校验：只做"配置自身是否自洽"的检查（与既有风格一致）。
+		//   - URL 必须 http/https 开头且能解析（拼路径转发前就发现手误，而不是每次请求才炸）；
+		//   - 外部渠道必须有 key（空 key 转发到上游必然 401，属于配置错误，提前拦下）；
+		//   - upstream_type 目前只允许 openai / 空（避免填错协议却静默按 openai 转发）。
+		def.UpstreamURL = strings.TrimSpace(def.UpstreamURL)
+		def.UpstreamType = strings.TrimSpace(def.UpstreamType)
+		if def.UpstreamURL != "" {
+			if !strings.HasPrefix(def.UpstreamURL, "http://") && !strings.HasPrefix(def.UpstreamURL, "https://") {
+				return fmt.Errorf("channels.groups[%q].upstream_url: 必须以 http:// 或 https:// 开头", name)
+			}
+			if _, err := url.ParseRequestURI(def.UpstreamURL); err != nil {
+				return fmt.Errorf("channels.groups[%q].upstream_url: %w", name, err)
+			}
+			if strings.TrimSpace(def.UpstreamKey) == "" {
+				return fmt.Errorf("channels.groups[%q].upstream_key: 外部上游渠道必须填写上游密钥", name)
+			}
+		}
+		switch def.UpstreamType {
+		case "", "openai":
+		default:
+			return fmt.Errorf("channels.groups[%q].upstream_type: %q 非法（openai / 空）", name, def.UpstreamType)
+		}
 		ch.Groups[name] = def
 	}
 	for ref, group := range ch.Keys {
@@ -159,11 +198,13 @@ func (r *channelRouter) Set(ch *Channels) {
 				continue
 			}
 			info := server.ChannelInfo{
-				Group:   group,
-				Label:   def.Label,
-				Realm:   def.Realm,
-				Models:  def.Models,
-				Enabled: def.EnabledOn(),
+				Group:       group,
+				Label:       def.Label,
+				Realm:       def.Realm,
+				Models:      def.Models,
+				Enabled:     def.EnabledOn(),
+				UpstreamURL: def.UpstreamURL,
+				UpstreamKey: def.UpstreamKey,
 			}
 			if strings.HasPrefix(ref, apikeys.SecretPrefix) {
 				hasPrefix = true
@@ -259,21 +300,60 @@ type channelBindingStatus struct {
 
 // channelStatus 是 /status 的 channels 段载荷（main.status 组装）。
 type channelStatus struct {
-	Enabled  bool                   `json:"enabled"`
-	Groups   map[string]ChannelDef  `json:"groups"`
-	Bindings []channelBindingStatus `json:"bindings"`
+	Enabled  bool                       `json:"enabled"`
+	Groups   map[string]channelStatusDef `json:"groups"`
+	Bindings []channelBindingStatus     `json:"bindings"`
+}
+
+// channelStatusDef 渠道定义的状态透出形态：与 ChannelDef 同构，但**上游密钥脱敏**
+// （只留长度与尾 4 位）。/status 是运维观测面，不该成为上游密钥的泄露口。
+type channelStatusDef struct {
+	Label       string   `json:"label"`
+	Realm       string   `json:"realm"`
+	Models      []string `json:"models"`
+	Enabled     bool     `json:"enabled"`
+	UpstreamURL string   `json:"upstream_url,omitempty"`
+	UpstreamKey string   `json:"upstream_key,omitempty"` // 已脱敏
+}
+
+func (d ChannelDef) statusView() channelStatusDef {
+	key := ""
+	if d.UpstreamKey != "" {
+		// 只留"长度 + 尾 4 位"：足以核对填的是不是预期的那把钥匙，又不足以复用。
+		key = "***" + d.UpstreamKey[max(0, len(d.UpstreamKey)-4):] + "(len=" + itoa(len(d.UpstreamKey)) + ")"
+	}
+	return channelStatusDef{
+		Label:       d.Label,
+		Realm:       d.Realm,
+		Models:      d.Models,
+		Enabled:     d.EnabledOn(),
+		UpstreamURL: d.UpstreamURL,
+		UpstreamKey: key,
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	buf := make([]byte, 0, 8)
+	for n > 0 {
+		buf = append([]byte{byte('0' + n%10)}, buf...)
+		n /= 10
+	}
+	return string(buf)
 }
 
 // status 快照当前绑定表（持锁拷贝，调用路径是低频状态端点）。
 func (r *channelRouter) status() channelStatus {
 	if r == nil {
-		return channelStatus{Groups: map[string]ChannelDef{}}
+		return channelStatus{Groups: map[string]channelStatusDef{}}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := channelStatus{Enabled: r.enabled, Groups: map[string]ChannelDef{}}
+	out := channelStatus{Enabled: r.enabled, Groups: map[string]channelStatusDef{}}
 	for name, def := range r.lastGroupsLocked() {
-		out.Groups[name] = def
+		out.Groups[name] = def.statusView()
 	}
 	out.Bindings = r.bindingsLocked()
 	return out

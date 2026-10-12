@@ -690,7 +690,7 @@ function renderPick() {
   if (!d) {
     $('pickModeNote').textContent = '（老服务端无 pick 数据）';
     $('grpBody').innerHTML = '<tr><td colspan="6"><div class="empty">无策略数据</div></td></tr>';
-    $('pickAcctBody').innerHTML = '<tr><td colspan="7"><div class="empty">无策略数据</div></td></tr>';
+    $('pickAcctBody').innerHTML = '<tr><td colspan="5"><div class="empty">无策略数据</div></td></tr>';
     return;
   }
   if (!pickState.dirty) {
@@ -714,27 +714,19 @@ function renderPick() {
     return '<tr><td class="who"><div class="nm">' + esc(g.name) + '</div></td>' +
       '<td class="num">' + g.priority + '</td>' +
       '<td class="num">' + g.weight + '</td>' +
-      '<td class="num" title="' + esc(tdisp) + '">' + g.members + '</td><td>' +
+      '<td class="num">' + g.members + '</td><td>' +
       '<button class="xs ghost" data-act="grp-edit" data-g="' + esc(g.name) + '">编辑</button> ' +
       '<button class="xs ghost danger" data-act="grp-del" data-g="' + esc(g.name) + '">删除</button></td></tr>';
   }).join('') : '<tr><td colspan="5"><div class="empty">无分组（账号直比）。点「新增分组」创建主备组。</div></td></tr>';
-  // 账号权重表（只读 + 编辑按钮；权重/分组/优先级走弹窗 editAcctModal）
+  // 账号权重表：只保留"这个号属于哪个分组、权重多少"两件事——观测类的占比条、
+  // 最终权重、选中次数全部砍掉（用户明确嫌这一页太重，那些数字也不随设置变化，
+  // 容易误读成"权重没生效"）。想看实际分流去 /status 的 pick.distribution。
   const rows = pickAcctRows();
-  // 配置权重份额：weight_cfg>0 的归一占比。**不再**画"实际选中次数"——那反映的是历史
-  // 流量，与权重设置无关：把某号调到 9 倍，条仍然是各 20%，看着像没生效（用户已反馈）。
-  // 现在按权重画，设 3:1 立刻看到 75%:25%。
-  const wOf = r => { const v = Number(r.weight); return (Number.isFinite(v) && v > 0) ? v : 0; };
-  const wSum = rows.reduce((a, r) => a + wOf(r), 0);
-  const picksTotal = rows.reduce((a, r) => a + Number(r.picks || 0), 0);
   $('pickAcctBody').innerHTML = rows.length ? rows.map(r => {
     const uid = String(r.uid || '');
     const short = uid.length > 16 ? uid.slice(0, 16) + '…' : uid;
-    const wv = wOf(r);
-    const weightVal = Number.isFinite(Number(r.weight)) ? Number(r.weight) : 1;
-    const pct = wSum ? Math.round(wv / wSum * 100) : 0;
-    // 已消耗份额（按 pick 次数占统计总量）与配置份额同图对照：深色=已消耗，浅色=剩余
-    // 配额，一眼看出"配了多少 vs 用掉多少"，而配置份额本身立刻随设置变化。
-    const usedPct = picksTotal ? Math.min(pct, Math.round(Number(r.picks || 0) / picksTotal * 100)) : 0;
+    const wv = Number(r.weight);
+    const weightVal = Number.isFinite(wv) ? wv : 1;
     const wTag = wv === 0 ? ' <span class="tag bad">摘除</span>' : '';
     const grpTag = r.group ? esc(r.group) : '<span class="note">（无）</span>';
     const nm = r.nickname
@@ -745,13 +737,8 @@ function renderPick() {
       '<td>' + grpTag + '</td>' +
       '<td class="num">' + r.priority + '</td>' +
       '<td class="num">' + weightVal + wTag + '</td>' +
-      '<td class="num" title="w_base × weight_cfg：被 pick 过才有值，未选过即 0">' +
-        (Number(r.w_final || 0).toFixed(2)) + '</td>' +
-      '<td class="num">' + (r.picks || 0) + '次</td>' +
-      '<td><div class="pick-share" title="权重份额 ' + pct + '% · 已消耗 ' + usedPct + '%">' +
-        '<i style="width:' + usedPct + '%"></i><b style="width:' + (pct - usedPct) + '%"></b></div>' +
-      '<button class="xs ghost" data-act="acct-edit" data-u="' + esc(uid) + '">编辑</button></td></tr>';
-  }).join('') : '<tr><td colspan="8"><div class="empty">池是空的</div></td></tr>';
+      '<td><button class="xs ghost" data-act="acct-edit" data-u="' + esc(uid) + '">编辑</button></td></tr>';
+  }).join('') : '<tr><td colspan="5"><div class="empty">池是空的</div></td></tr>';
 }
 function pickErr(msg) {
   const el = $('pickError');
@@ -921,6 +908,8 @@ document.addEventListener('keydown', ev => {
   if (ev.key !== 'Escape') return;
   if (editState.modalOpen) { ev.preventDefault(); closeEditModal(); return; }
 });
+// 渠道类型切换：显示/隐藏上游接入区块（change 委托，弹窗是静态 DOM 不需要重绑）。
+if ($('chEditKind')) $('chEditKind').addEventListener('change', chEditToggleKind);
 async function savePick() {
   // 「保存策略」只保存模式/算法/快过期开关与窗口（页面级 4 个控件）。
   // 分组与账号权重走各自弹窗的 pushConfigPatch 单次入库，两条写盘路径彻底分离——
@@ -2687,9 +2676,16 @@ function renderChannels() {
     const eTag = enabled ? '' : ' <span class="tag bad">停用</span>';
     const wl = chModelListText(d.models);
     const rt = chState.route[n] || {};
-    return '<tr title="成员：' + esc(members.join('、') || '（无）') + '">' +
+    const isExt = !!(d.upstream_url);
+    const kindTag = isExt ? '<span class="tag ok">外部上游</span>' : '<span class="tag">账号池</span>';
+    const urlCell = isExt
+      ? '<span class="id" title="' + esc(d.upstream_url) + '">' + esc(String(d.upstream_url).replace(/^https?:\/\//i, '')) + '</span>'
+      : '<span class="note">—</span>';
+    return '<tr title="' + (isExt ? '上游：' + esc(d.upstream_url) : '成员：' + esc(members.join('、') || '（无）')) + '">' +
       '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div></td>' +
-      '<td>' + ((d.realm || '') === '' ? '<span class="note">（不限）</span>' : esc(d.realm)) + '</td>' +
+      '<td>' + kindTag + '</td>' +
+      '<td>' + urlCell + '</td>' +
+      '<td>' + ((isExt ? '' : (d.realm || '') === '' ? '<span class="note">（不限）</span>' : esc(d.realm)) || '<span class="note">—</span>') + '</td>' +
       '<td>' + (wl ? esc(wl) : '<span class="note">（不限）</span>') + '</td>' +
       '<td class="num">' + (rt.priority != null ? rt.priority : 0) + '</td>' +
       '<td class="num">' + (rt.weight != null ? rt.weight : 1) + '</td>' +
@@ -2697,7 +2693,7 @@ function renderChannels() {
       '<td><span class="tag ' + (enabled ? 'ok">启用' : 'bad">停用') + '</span>' + eTag + '</td>' +
       '<td><button class="xs ghost" data-act="ch-edit" data-g="' + esc(n) + '">编辑</button> ' +
       '<button class="xs ghost danger" data-act="ch-del" data-g="' + esc(n) + '">删除</button></td></tr>';
-  }).join('') : '<tr><td colspan="8"><div class="empty">还没有渠道。点「新增渠道」创建一个分组渠道，' +
+  }).join('') : '<tr><td colspan="9"><div class="empty">还没有渠道。点「新增渠道」创建：外部上游（填地址+密钥）或账号池分组。' +
       '再到账号池把账号归入该分组。</div></td></tr>';
 
   // 密钥绑定表（只读生效列 + 绑定按钮走弹窗；下拉选择走独立 saveKeyGroup 单次入库）
@@ -2801,6 +2797,15 @@ function chEditModal(mode, name) {
   $('chEditRealm').value = (row && row.realm) || '';
   $('chEditModels').value = chModelListText((row && row.models) || []);
   $('chEditEnabled').checked = !row || row.enabled !== false;
+  // 上游接入：外部渠道填了 upstream_url，账号池渠道为空。kind 决定显示哪一组字段。
+  const isExt = !!(row && row.upstream_url);
+  $('chEditKind').value = isExt ? 'external' : 'pool';
+  $('chEditUpstreamURL').value = (row && row.upstream_url) || '';
+  // 编辑时密钥框不回填明文（只留占位提示"已保存，留空即不修改"），避免页面长期驻留上游密钥。
+  $('chEditUpstreamKey').value = '';
+  $('chEditUpstreamKey').placeholder = isExt ? '已保存，留空表示不修改' : 'sk-...';
+  $('chEditUpstreamType').value = (row && row.upstream_type) || 'openai';
+  chEditToggleKind();
   // 路由属性（优先级/权重）在 pool.groups，渠道弹窗里一并可改。
   const route = (mode === 'edit' && chState.route[name]) || {};
   $('chEditPriority').value = route.priority != null ? route.priority : 0;
@@ -2815,10 +2820,29 @@ function chEditModal(mode, name) {
   $('chEditVeil').classList.add('on');
   nm.focus();
 }
+// chEditToggleKind 按渠道类型切换字段显示：外部上游显示接入区块、隐藏成员提示；
+// 账号池渠道反之（外部渠道没有"成员账号"概念，请求不进池子）。
+function chEditToggleKind() {
+  const isExt = String(($('chEditKind') || {}).value || '') === 'external';
+  $('chEditUpstream').hidden = !isExt;
+  const memEl = $('chEditMembers');
+  if (memEl) memEl.hidden = isExt;
+  // realm 只对账号池渠道有意义（选号域过滤）；外部上游的"域"由上游地址决定。
+  const realmEl = $('chEditRealm');
+  if (realmEl) { realmEl.closest('label').hidden = isExt; }
+}
+
 // chEditRenderMembers 在渠道弹窗里显示成员账号（昵称优先）与引导文案。
 function chEditRenderMembers(name, mode) {
   const el = $('chEditMembers');
   if (!el) return;
+  const isExt = String(($('chEditKind') || {}).value || '') === 'external';
+  if (isExt) {
+    el.textContent = mode === 'edit'
+      ? '外部上游渠道：请求直接转发到上面填的上游地址，不走账号池、不消耗账号积分。'
+      : '外部上游渠道：填好上面的地址与密钥即可，无需在账号池归组。';
+    return;
+  }
   if (mode !== 'edit') {
     el.textContent = '新建后，在账号池页把账号的「分组」选成本渠道，这里会列出成员。';
     return;
@@ -2860,8 +2884,32 @@ async function chEditSubmit() {
   try {
     // 一次写盘：渠道属性（channels.groups）与路由属性（pool.groups）同时落，
     // 不会出现"渠道建好但账号池分组缺失"的中间态。
+    // 按类型组装：外部渠道带上上游接入三件套；账号池渠道清空上游字段
+    // （从外部改回账号池时必须清空，否则残留的 url 仍会把请求转发出去）。
+    const isExt = String($('chEditKind').value || '') === 'external';
+    const def = { label, realm, models, enabled };
+    if (isExt) {
+      const url = String($('chEditUpstreamURL').value || '').trim();
+      const key = String($('chEditUpstreamKey').value || '');
+      if (!/^https?:\/\//i.test(url)) { chEditErr('请求地址必须以 http:// 或 https:// 开头'); $('chEditUpstreamURL').focus(); return; }
+      // 新建必须填 key；编辑时留空表示"沿用已保存的密钥"（页面不长期驻留上游密钥）。
+      const isCreate = !$('chEditName').disabled;
+      if (isCreate && !key.trim()) { chEditErr('新建外部渠道必须填写上游 API Key'); $('chEditUpstreamKey').focus(); return; }
+      def.upstream_url = url;
+      if (key.trim()) def.upstream_key = key.trim();
+      else if (isCreate) { chEditErr('新建外部渠道必须填写上游 API Key'); return; }
+      def.upstream_type = String($('chEditUpstreamType').value || 'openai');
+    } else {
+      def.upstream_url = '';
+      def.upstream_key = '';
+      def.upstream_type = '';
+    }
     await pushConfigPatch(state => {
-      state.chGroups[name] = { label, realm, models, enabled };
+      const prev = state.chGroups[name] || {};
+      // 编辑且密钥留空 → 保留原密钥（不覆盖成空）。
+      if (!isExt) { def.upstream_key = ''; }
+      else if (!def.upstream_key && prev.upstream_key) { def.upstream_key = prev.upstream_key; }
+      state.chGroups[name] = def;
       state.groups[name] = { priority: pri, weight: w };
     });
     toast('渠道「' + name + '」已保存', 'ok');

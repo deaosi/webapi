@@ -12,6 +12,11 @@ package server
 import "strings"
 
 // ChannelInfo 调用密钥绑定的上游渠道。零值 = 未绑定（不限制，现状行为）。
+//
+// 两种渠道形态由 UpstreamURL 是否为空决定：
+//   - 空：账号池渠道。请求在 Group 指定的账号分组内选号，走 WorkBuddy 上游（既有语义）；
+//   - 非空：外部上游渠道。请求**转发**到该 OpenAI 兼容端点，用 UpstreamKey 鉴权，
+//     不进账号池、不选号、不消耗账号积分。
 type ChannelInfo struct {
 	// Group 账号分组名：渠道成员 = pool.accounts[u].group == Group 的账号。
 	Group string
@@ -25,7 +30,15 @@ type ChannelInfo struct {
 	// Enabled 渠道启停：false 时该 key 的请求直接 403（不静默回落全池——
 	// 静默回落会让"停用渠道"变成"越权用别组账号"）。
 	Enabled bool
+	// UpstreamURL 外部上游基址（如 "https://api.deepseek.com/v1"）。非空 = 外部渠道，
+	// 请求转发到它，不再走账号池。
+	UpstreamURL string
+	// UpstreamKey 外部上游鉴权密钥（转发时替换 Authorization）。
+	UpstreamKey string
 }
+
+// IsExternal 该渠道是否为外部上游端点（填了 UpstreamURL）。
+func (c ChannelInfo) IsExternal() bool { return strings.TrimSpace(c.UpstreamURL) != "" }
 
 // ChannelResolver 解析调用密钥所属渠道。ok=false 表示该 key 未绑定渠道
 // （不限制，主密钥与未绑定 key 走这条）。nil = 渠道功能整体关闭。

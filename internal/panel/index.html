@@ -654,10 +654,10 @@ select.grp-sel { max-width: 130px; }
           <div class="hr"></div>
           <h4 class="sub-h">账号权重 <span class="hint">weight 0 = 软摘除（不出池，只是不被选中）</span></h4>
           <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>账号</th><th>分组</th><th>优先级</th><th>权重</th><th>最终权重</th><th>选中</th><th>占比（按配置权重）</th><th class="c-acts">操作</th></tr></thead>
+            <thead><tr><th>账号</th><th>分组</th><th>优先级</th><th>权重</th><th class="c-acts">操作</th></tr></thead>
             <tbody id="pickAcctBody"></tbody>
           </table></div>
-          <p class="ak-note">占比条就是<strong>配置权重</strong>换算（0=摘除）：深色=已消耗，浅色=剩余配额，改权重立刻按比例变化。
+          <p class="ak-note">权重只决定这个号被选中的相对概率（0=摘除）；实际分流见 /status 的 pick 分布。
             「保存策略」只保存上面的模式/算法/快过期；分组与账号走弹窗编辑、单次入库。</p>
           <div class="ak-error" id="pickError" role="status" hidden></div>
         </div>
@@ -945,7 +945,7 @@ select.grp-sel { max-width: 130px; }
           <h4 class="sub-h">渠道定义 <span class="hint">渠道 = 一个账号分组 + 它的上游属性与路由权重；成员账号在「账号池」页归组</span>
             <span class="grow"></span><button class="xs" id="btnChGroupAdd">新增渠道</button></h4>
           <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>渠道</th><th>上游域</th><th>模型白名单</th><th>优先级</th><th>权重</th><th>成员</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
+            <thead><tr><th>渠道</th><th>类型</th><th>上游地址</th><th>模型白名单</th><th>优先级</th><th>权重</th><th>成员</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
             <tbody id="chGroupBody"></tbody>
           </table></div>
           <div class="hr"></div>
@@ -981,8 +981,32 @@ select.grp-sel { max-width: 130px; }
             <div class="fld"><span class="lb">启用</span>
               <label class="sel-note"><input type="checkbox" id="chEditEnabled"> 该渠道可用</label></div>
           </div>
+          <label class="fld"><span class="lb">渠道类型</span>
+            <select id="chEditKind">
+              <option value="pool">账号池分组（走 WorkBuddy 账号，按分组选号）</option>
+              <option value="external">外部上游端点（填请求地址 + 密钥，直接转发）</option>
+            </select>
+            <span class="hint">选「外部上游」时填写下面的接入信息；选「账号池」则忽略它们</span></label>
+
+          <div id="chEditUpstream" hidden>
+            <div class="hr"></div>
+            <h4 class="sub-h">接入上游 <span class="hint">NewAPI 口径：渠道就是一个上游端点</span></h4>
+            <label class="fld"><span class="lb">请求地址（base_url）</span>
+              <input id="chEditUpstreamURL" placeholder="https://api.deepseek.com/v1" autocomplete="off">
+              <span class="hint">OpenAI 兼容基址，不带末尾斜杠；转发到 &lt;地址&gt;/chat/completions</span></label>
+            <label class="fld"><span class="lb">上游 API Key</span>
+              <input id="chEditUpstreamKey" type="password" placeholder="sk-..." autocomplete="new-password">
+              <span class="hint">转发时替换 Authorization；列表与 /status 只显示脱敏串</span></label>
+            <label class="fld"><span class="lb">上游协议</span>
+              <select id="chEditUpstreamType">
+                <option value="openai">openai（OpenAI 兼容）</option>
+              </select></label>
+          </div>
+
           <label class="fld"><span class="lb">模型白名单（逗号分隔）</span>
-            <input id="chEditModels" placeholder="留空=不限，可 glm-5*" autocomplete="off"></label>
+            <input id="chEditModels" placeholder="留空=不限，可 glm-5*" autocomplete="off">
+            <span class="hint">外部上游：留空表示不限（列表留空、由客户端指定）；填了就只放行这些模型</span></label>
+
           <div class="grid2">
             <label class="fld"><span class="lb">优先级（越小越先消耗）</span>
               <input id="chEditPriority" type="number" step="1" autocomplete="off"></label>
@@ -1005,7 +1029,7 @@ select.grp-sel { max-width: 130px; }
       <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="keyBindTitle">
         <header><h3 id="keyBindTitle">绑定密钥</h3><div class="hint" id="keyBindHint"></div></header>
         <div class="body">
-          <label class="fld"><span class="lb">绑定到渠道分组</span>
+          <label class="fld"><span class="lb">绑定到渠道</span>
             <select id="keyBindSel"></select>
             <span class="hint">选「不限制」即解绑，该密钥恢复全池可用</span></label>
           <div class="state err" id="keyBindModalError" role="status" hidden></div>
