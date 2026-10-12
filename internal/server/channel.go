@@ -71,9 +71,18 @@ func FilterChannelModels(list []map[string]any, ch ChannelInfo) []map[string]any
 // 前者是"归谁服务"（不匹配就交给账号池）。绑定外部渠道的 key 因此可以同时用到
 // 两类模型：白名单内的走外部上游，其余继续走 WorkBuddy 账号池。
 //
-// 空名单 = 全部承接（该渠道独占，请求一律转发，不回落账号池）——保留既有配置语义，
-// 也避免"白名单没填就以为没生效"。
+// 空名单 = **不承接任何模型**（安全默认）。这条刻意与 ChannelAllowedModel 相反：
+// 那里空名单是"全放开"（账号池渠道不限制用什么模型），这里若也全放开，效果就是
+// "绑一下就整条 key 全部改走外部上游、彻底失去账号池兜底"——上游一旦余额不足/宕机，
+// 这把 key 的所有模型一起挂掉。实测踩过两次（绑完发现"所有模型都报余额不足"），
+// 所以默认改成不做任何接管：绑定本身不改变现有行为，运维显式填了模型名才开始分流。
+//
+// 想让全部模型都走外部上游（明确的独占意图）就填 `*`：它命中下面的前缀通配，
+// 等价于"全放开"，且是**运维主动写下的**，不会被误当成"还没填"。
 func ChannelServesModel(models []string, bare string) bool {
+	if len(models) == 0 {
+		return false
+	}
 	return ChannelAllowedModel(models, bare)
 }
 

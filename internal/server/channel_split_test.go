@@ -15,8 +15,13 @@ func TestChannelServesModelSplit(t *testing.T) {
 		model  string
 		want   bool
 	}{
-		{"留空=全部走上游", nil, "anything", true},
-		{"留空(空切片)=全部", []string{}, "anything", true},
+		// 安全默认：空名单 = 不接管任何模型（绑定本身不改变现有行为）。
+		// 曾经是"空=全部走上游"，效果是绑一下就把整条 key 打废（实测踩过两次），
+		// 所以语义翻转为不接管；要独占就显式写 `*`。
+		{"留空=不接管任何模型", nil, "anything", false},
+		{"留空(空切片)=不接管", []string{}, "anything", false},
+		{"星号=全部走上游", []string{"*"}, "anything", true},
+		{"星号=全部走上游(带前缀模型名)", []string{"*"}, "cn:glm-5.3", true},
 		{"精确命中", []string{"glm-5.3"}, "glm-5.3", true},
 		{"未命中=回落账号池", []string{"glm-5.3"}, "deepseek-v4", false},
 		{"前缀通配命中", []string{"glm-5*"}, "glm-5.3-flash", true},
@@ -47,6 +52,21 @@ func TestChannelInfoIsExternal(t *testing.T) {
 		if got := (ChannelInfo{UpstreamURL: c.url}).IsExternal(); got != c.want {
 			t.Errorf("IsExternal(%q) = %v, want %v", c.url, got, c.want)
 		}
+	}
+}
+
+// 空名单在两种语义下的对照：账号池渠道的硬性放行名单里空=全放开，
+// 外部渠道的分流名单里空=不接管。二者刻意不同，改动任一个都会影响生产路由。
+func TestEmptyWhitelistSemanticsDiffer(t *testing.T) {
+	if !ChannelAllowedModel(nil, "glm-5.3") {
+		t.Error("账号池渠道：空名单应表示不限制模型（全放开）")
+	}
+	if ChannelServesModel(nil, "glm-5.3") {
+		t.Error("外部渠道：空名单应表示不接管任何模型（安全默认）")
+	}
+	// `*` 是"我明确要全部走外部上游"的写法，必须真的全承接。
+	if !ChannelServesModel([]string{"*"}, "任意模型名") {
+		t.Error("外部渠道：`*` 应表示全部承接")
 	}
 }
 

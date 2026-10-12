@@ -2724,16 +2724,14 @@ function renderChannels() {
       const url = esc(chState.defs[bound].upstream_url);
       const host = esc(String(chState.defs[bound].upstream_url).replace(/^https?:\/\//i, ''));
       const wl = (chState.defs[bound].models || []).length;
-      // 空白名单 = **全部**模型走上游、不回落账号池：上游一旦不可用（余额不足/宕机），
-      // 这把 key 就整个失效。这是个实测踩过的坑（绑完发现"所有模型都报余额不足"），
-      // 所以空白名单用警示色，并在 tooltip 里说清怎么恢复兜底。
+      // 空白名单 = 该渠道**不接管任何模型**（安全默认）：绑定已生效，但请求照旧走账号池。
+      // 这曾经是"全部模型走上游、无兜底"，绑一下就把整条 key 打废（实测踩过两次），
+      // 故改为不接管，并在这里明确告知"还没分流"，避免"绑了怎么没反应"的另一种困惑。
       eff = wl
         ? '<span class="tag ok" title="请求转发到 ' + url +
-          '；未命中白名单的模型回落账号池">外部上游 ' + host + ' · 白名单 ' + wl + ' 项</span>'
-        : '<span class="tag warn" title="白名单留空 = 全部模型都转发到 ' + url +
-          '，不回落账号池。上游不可用（例如余额不足）时这个 key 会全部失败——' +
-          '把只走上游的模型名填进白名单，其余模型即可继续用账号池">外部上游 ' + host +
-          ' · <strong>全部模型</strong>（无兜底）</span>';
+          '；未命中白名单的模型回落账号池">外部上游 ' + host + ' · ' + wl + ' 项模型走上游</span>'
+        : '<span class="tag warn" title="白名单为空：请求仍全部走账号池。到渠道里填要走上游的模型名即可开始分流；填 * 表示全部模型都走外部上游">外部上游 ' +
+          host + ' · <strong>未接管</strong>（白名单为空）</span>';
     } else {
       const cnt = channelMemberNames(bound).length;
       eff = cnt ? '<span class="tag ok">限 ' + esc(bound) + ' · ' + cnt + ' 个账号</span>'
