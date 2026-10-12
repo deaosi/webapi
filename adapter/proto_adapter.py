@@ -1277,9 +1277,17 @@ class Handler(BaseHTTPRequestHandler):
         return panel_accepts_key(given)
 
     def _upstream_headers(self, extra=None):
-        # 调用方已在 _auth_ok 验过，上游一律用 panel 主密钥（与 zen-gateway 的
-        # proxyToPanel 同款）：panel 只认主密钥，把客户端的调用密钥转发过去会 401。
-        key = load_adapter_key()
+        # 透传调用方密钥（而不是一律换主密钥）。
+        #
+        # 为什么必须透传：panel 的 withAPIAuth 同时接受主密钥与受管调用密钥，而
+        # **渠道解析（channels.keys 的"密钥 → 渠道"绑定）依赖调用密钥 ID**——
+        # 换主密钥后 panel 看到的是主密钥，它没有渠道绑定，于是渠道隔离与外部上游
+        # 转发在 /adapter/* 路径上整体失效（表现为"绑了没生效"）。
+        # 旧注释"panel 只认主密钥、透传会 401"与事实不符：调用密钥本就是 panel 签发的
+        # api_keys 条目，_auth_ok 也已用它验过（含 panel_accepts_key 探测），透传安全。
+        # 仅在调用方没带密钥（适配器未设主密钥的免鉴权形态）时回落到主密钥。
+        given = _caller_key(self.headers)
+        key = given or load_adapter_key()
         h = {"Content-Type": "application/json"}
         if key:
             h["Authorization"] = "Bearer " + key
