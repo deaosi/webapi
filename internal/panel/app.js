@@ -2840,6 +2840,11 @@ function chEditToggleKind() {
   const fetchRow = $('chEditFetchRow');
   if (fetchRow) fetchRow.hidden = !isExt;
   if (!isExt) chEditClearFetched();
+  // 优先级/权重是**账号池多分组分流**用的（同 priority 多组间按权重分）。
+  // 一个调用密钥只绑一个渠道，外部上游渠道不存在"多组竞争"，这两项对它是死字段：
+  // 显示出来只会让人以为要填、填了又不生效。隐藏掉，也不参与校验与写盘。
+  const routeRow = $('chEditRouteRow');
+  if (routeRow) routeRow.hidden = isExt;
 }
 
 // ── 拉取上游模型（帮助填写白名单：外部上游有哪些模型只有上游自己知道）──
@@ -2943,10 +2948,15 @@ async function chEditSubmit() {
   const models = String($('chEditModels').value || '').split(',').map(s => s.trim()).filter(Boolean);
   const label = String($('chEditLabel').value || '').trim();
   const enabled = !!$('chEditEnabled').checked;
-  const pri = Math.trunc(Number(String($('chEditPriority').value).trim()));
-  if (!Number.isFinite(pri)) { chEditErr('优先级必须是整数'); $('chEditPriority').focus(); return; }
-  const w = Number(String($('chEditWeight').value).trim());
-  if (!Number.isFinite(w) || w <= 0) { chEditErr('渠道权重必须 >0 的数字'); $('chEditWeight').focus(); return; }
+  // 外部渠道跳过优先级/权重校验：这两项对它不生效，隐藏字段里的残值不该拦住保存。
+  const isExternalKind = String($('chEditKind').value || '') === 'external';
+  let pri = 0, w = 1;
+  if (!isExternalKind) {
+    pri = Math.trunc(Number(String($('chEditPriority').value).trim()));
+    if (!Number.isFinite(pri)) { chEditErr('优先级必须是整数'); $('chEditPriority').focus(); return; }
+    w = Number(String($('chEditWeight').value).trim());
+    if (!Number.isFinite(w) || w <= 0) { chEditErr('渠道权重必须 >0 的数字'); $('chEditWeight').focus(); return; }
+  }
   chEditState.saving = true; $('chEditSave').disabled = true; $('chEditSave').textContent = '保存中…';
   try {
     // 一次写盘：渠道属性（channels.groups）与路由属性（pool.groups）同时落，
@@ -2979,7 +2989,11 @@ async function chEditSubmit() {
       if (!isExt) { def.upstream_key = ''; }
       else if (!def.upstream_key && prev.upstream_key) { def.upstream_key = prev.upstream_key; }
       state.chGroups[name] = def;
-      state.groups[name] = { priority: pri, weight: w };
+      // 只给**账号池渠道**建/改池分组：外部渠道不参与池内选号，给它建一个 0 成员的
+      // 池分组只会在「账号池」页凭空多出一行、让人以为要往里塞账号。顺带把历史上
+      // 误建的残留删掉（该分组对外部渠道没有任何作用）。
+      if (!isExt) state.groups[name] = { priority: pri, weight: w };
+      else delete state.groups[name];
     });
     toast('渠道「' + name + '」已保存', 'ok');
     closeChEditModal(false, true);
