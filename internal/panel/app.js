@@ -2692,8 +2692,10 @@ function renderChannels() {
       '<td>' + urlCell + '</td>' +
       '<td>' + ((isExt ? '' : (d.realm || '') === '' ? '<span class="note">（不限）</span>' : esc(d.realm)) || '<span class="note">—</span>') + '</td>' +
       '<td>' + (wl ? esc(wl) : '<span class="note">（不限）</span>') + '</td>' +
-      '<td class="num">' + (rt.priority != null ? rt.priority : 0) + '</td>' +
-      '<td class="num">' + (rt.weight != null ? rt.weight : 1) + '</td>' +
+      // 优先级/权重只对账号池渠道有效（同 priority 多分组按权重分流）。外部渠道独占
+      // 整条 key，这两项不参与任何决策——显示 0/1 会被误读成"配了但不生效"，直接给 —。
+      '<td class="num">' + (isExt ? '<span class="note">—</span>' : (rt.priority != null ? rt.priority : 0)) + '</td>' +
+      '<td class="num">' + (isExt ? '<span class="note">—</span>' : (rt.weight != null ? rt.weight : 1)) + '</td>' +
       '<td>' + mTag + '</td>' +
       '<td><span class="tag ' + (enabled ? 'ok">启用' : 'bad">停用') + '</span>' + eTag + '</td>' +
       '<td><button class="xs ghost" data-act="ch-edit" data-g="' + esc(n) + '">编辑</button> ' +
