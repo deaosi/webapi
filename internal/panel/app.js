@@ -3076,7 +3076,9 @@ document.addEventListener('click', ev => {
   const veil = ev.target;
   if (veil === $('chEditVeil')) { closeChEditModal(); return; }
   if (veil === $('keyBindVeil')) { closeKeyBindModal(); return; }
-  const b = veil.closest && veil.closest('button[data-act]');
+  // 选 [data-act] 而不是 button[data-act]：这一页的"上游模型候选"是 span，
+  // closest('button[data-act]') 永远匹配不到，点了没反应（且不报错，很难查）。
+  const b = veil.closest && veil.closest('[data-act]');
   if (!b || b.disabled) return;
   const act = b.dataset.act;
   if (act === 'ch-edit') { chEditModal('edit', b.dataset.g); return; }

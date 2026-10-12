@@ -399,6 +399,22 @@ function element() {
     querySelectorAll: () => [] };
 }
 const get = id => { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); };
+// trigger(containerId, act) 模拟"点击容器里 data-act=act 的那个元素"，并把它交给
+// document 上的全部 click 监听器（即真实分发链路）。
+// closest 按选择器区分：候选标签是 <span>，匹配 '[data-act]' 但**不**匹配
+// 'button[data-act]'——分发器若只找 button，这里就会返回 null、点击静默失效，
+// 正好复现线上那个"点了没反应"的 bug。
+const trigger = (containerId, act) => {
+  const html = get(containerId).innerHTML || '';
+  const m = new RegExp('data-act="' + act + '"([^>]*)').exec(html);
+  if (!m) throw new Error('容器 #' + containerId + ' 里没有 data-act=' + act + ' 的元素');
+  const dataM = /data-m="([^"]*)"/.exec(m[1]);
+  const el = {
+    tagName: 'SPAN', dataset: { act, m: dataM ? dataM[1] : undefined }, disabled: false,
+    closest: sel => (sel === 'button[data-act]' ? null : (sel === '[data-act]' ? el : null)),
+  };
+  for (const fn of (document._click || [])) fn({ target: el, preventDefault() {} });
+};
 const sandbox = {
   location: { hash: '#accounts', origin: 'http://127.0.0.1:4321' },
   history: { replaceState() {} },
@@ -570,7 +586,11 @@ const sandbox = {
       return [];
     },
     querySelector: () => null, getElementById: get,
-    addEventListener() {}, documentElement: element(), head: element(), body: element(),
+    // 记录 click 监听器：分发器就是 document 上的 click 监听器，no-op 桩会让
+    // "点击后应生效"这类用例无从验证。
+    _click: [],
+    addEventListener(t, fn) { if (t === 'click') document._click.push(fn); },
+    documentElement: element(), head: element(), body: element(),
     createElement: element, activeElement: element(), cookie: '' },
   fetch: () => new Promise(() => {}),
   addEventListener() {}, removeEventListener() {},
@@ -840,7 +860,14 @@ run('api = mockAPI');
   // （saving 要到 finally 才复位），曾导致"点了保存窗口还杵在那"。这里直接断言结果为 off。
   assert(get('chEditVeil').classList.has('on') === false, '渠道弹窗保存后应自动关闭');
   assert(get('keyBindVeil').classList.has('on') === false, '绑定弹窗保存后应自动关闭');
-  // 取消按钮仍受"保存中不许关"保护：非 force 路径不该能关掉正在保存的弹窗。
+  // 上游模型候选标签必须能经**点击分发器**生效：曾经分发器只找 button[data-act]，
+  // 而候选是 span，于是点了完全没反应且不报错。这里走真实点击链路（trigger），
+  // 而不是直接调 chEditToggleFetched——后者测不出"分发器匹配不到元素"这类断链。
+  run('chEditClearFetched(); chEditRenderFetched(["m-a","m-b"])');
+  assert(get('chEditFetchList').innerHTML.indexOf('m-a') >= 0, '候选标签应渲染出来');
+  trigger('chEditFetchList', 'chfetch-toggle');
+  assert(get('chEditModels').value === 'm-a',
+    '点候选标签应写入白名单，实得 ' + JSON.stringify(get('chEditModels').value));
   console.log('CHANNELS PANEL OK');
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });
 `
