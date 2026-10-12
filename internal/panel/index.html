@@ -589,6 +589,15 @@ select.grp-sel { max-width: 130px; }
             <div class="fld"><span class="lb">实际分布（进程内计数）</span>
               <div id="pickDist" class="note">—</div></div>
           </div>
+          <div class="grid2">
+            <div class="switch"><span class="lb">优先使用快过期积分</span>
+              <input type="checkbox" id="pickPreferExpiring"></div>
+            <label class="fld"><span class="lb">快过期窗口</span>
+              <input id="pickExpiringSoon" placeholder="168h" autocomplete="off">
+              <span class="hint">窗口内的批次参与到期优先；留空 / 0 = 关闭该门槛</span></label>
+          </div>
+          <p class="ak-note" id="pickExpireNote">开启且窗口内存在快过期积分时，选号按<strong>最早到期</strong>排序 ——
+            它<strong>压过</strong>下面的模式 / 权重 / 分档。想让权重完全做主就关掉它。</p>
           <div class="hr"></div>
           <h4 class="sub-h">分组 <span class="hint">priority 越小越先消耗；同 priority 多组按 weight 用 SWRR 分流（必须 &gt;0）</span>
             <span class="grow"></span><button class="xs" id="btnGroupAdd">新增分组</button></h4>

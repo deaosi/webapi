@@ -108,6 +108,7 @@ func main() {
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
+	p.SetExpiringSoon(cfg.Pool.ExpiringSoon) // 仅展示标签（面板/状态透出）
 	// 轮询策略（swrr/priority/account 路由，缺省 weighted+空表=现状行为）。
 	// normalize 已校验，此处错误只打日志不中断启动（防校验与注入口径漂移）。
 	if mode, inner, err := pool.NormalizePickMode(cfg.Pool.PickMode, cfg.Pool.PickInner); err != nil {
@@ -133,6 +134,9 @@ func main() {
 			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
 			// 裸名走 cn（现状零回归）。闭包内部 resolveModel 剥前缀，再按 realm 过滤。
 			AvailableForModel: realmAwareAvailableForModel(p),
+			// 首次分配走池子策略（权重/priority/swrr/成本层/到期优先）：不接这个回调
+			// 会话路由器会自行哈希分配，整条选号策略被旁路（详见 wiring.go 注释）。
+			Allocate: realmAwareAllocate(p),
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()
@@ -443,6 +447,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
+	p.SetExpiringSoon(newCfg.Pool.ExpiringSoon)
 	// 轮询策略热生效（normalize 已校验，非法值到不了这里）。
 	if mode, inner, err := pool.NormalizePickMode(newCfg.Pool.PickMode, newCfg.Pool.PickInner); err == nil {
 		_ = p.SetPickPolicy(mode, inner, newCfg.Pool.Accounts, newCfg.Pool.Groups)

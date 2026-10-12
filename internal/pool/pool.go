@@ -48,6 +48,11 @@ type Pool struct {
 	// preferExpiring 最早到期优先路由开关（默认 true）。开启且快过期窗口内存在有效
 	// 批次时，选号在成本层内先按最早到期排序；关闭后只使用普通加权路由。
 	preferExpiring bool
+	// expiringSoonLabel 快过期窗口的展示标签（如 "168h"；"" / "0" = 禁用）。
+	// 池子本身不消费该窗口——批次过滤由调度器把结果写进 entry.creditsExpiring，
+	// 选号侧只读 entry 字段。此处仅存标签，供 /status 与面板把「完整路由策略」
+	// 一处透出（否则窗口值只存在于 config/scheduler，面板要跨两处拼装）。
+	expiringSoonLabel string
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
@@ -199,6 +204,15 @@ func (p *Pool) SetPreferExpiring(enabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.preferExpiring = enabled
+}
+
+// SetExpiringSoon 注入快过期窗口的展示标签（原样存 config 里的字符串，如 "168h"）。
+// 与 SetPreferExpiring 配对：两者共同构成「优先使用快过期积分」这项策略，仅供
+// /status 与面板透出（池子不消费窗口，见字段注释）。
+func (p *Pool) SetExpiringSoon(label string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.expiringSoonLabel = label
 }
 
 // SetDegrade 注入连败降权参数（main 从 config 解析后调用，issue #114）。

@@ -618,6 +618,8 @@ function renderPick() {
   if (!pickState.dirty) {
     modeEl.value = d.mode || 'weighted';
     innerEl.value = d.inner || 'weighted';
+    const pe = $('pickPreferExpiring'); if (pe) pe.checked = d.prefer_expiring !== false;
+    const es = $('pickExpiringSoon'); if (es) es.value = String(d.expiring_soon || '');
   }
   const modeName = { weighted: '加权随机', swrr: '平滑轮询', priority: '主备分档' }[d.mode] || d.mode;
   $('pickModeNote').textContent = '当前 ' + modeName + (d.mode === 'priority' ? '（同档内 ' + d.inner + '）' : '');
@@ -738,7 +740,11 @@ async function savePick() {
     for (const uid of Object.keys(accounts)) {
       if (accounts[uid].group && !groups[accounts[uid].group]) accounts[uid].group = '';
     }
-    const body = { pool: { pick_mode: $('pickMode').value, pick_inner: $('pickInner').value, accounts, groups } };
+    const body = { pool: {
+      pick_mode: $('pickMode').value, pick_inner: $('pickInner').value,
+      prefer_expiring: !!($('pickPreferExpiring') || {}).checked,
+      expiring_soon: String(($('pickExpiringSoon') || {}).value || '').trim(),
+      accounts, groups } };
     const r = await api('config', { method: 'POST', body: JSON.stringify(body) });
     const n = (r.restart_required || []).length;
     toast(n ? '策略已保存，其中 ' + n + ' 项需重启' : '策略已保存并立即生效', 'ok');

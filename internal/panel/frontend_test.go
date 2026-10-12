@@ -586,6 +586,7 @@ run('api = mockAPI');
   // 内部不能再出现反引号（否则提前截断），故不走 JS 模板字面量。
   const pickFixture = { accounts: [], pick: {
     mode: 'priority', inner: 'swrr',
+    prefer_expiring: true, expiring_soon: '168h',
     groups: [{ name: 'main', priority: 0, weight: 1, members: 1 },
              { name: 'backup', priority: 10, weight: 1, members: 1 }],
     accounts: [
@@ -597,6 +598,8 @@ run('api = mockAPI');
   run('renderPick()');
   assert.strictEqual(get('pickMode').value, 'priority');
   assert.strictEqual(get('pickInner').value, 'swrr');
+  assert.strictEqual(get('pickPreferExpiring').checked, true);
+  assert.strictEqual(get('pickExpiringSoon').value, '168h');
   assert(get('grpBody').innerHTML.includes('main'));
   assert(get('grpBody').innerHTML.includes('backup'));
   const rows = get('pickAcctBody').innerHTML;
@@ -615,6 +618,9 @@ run('api = mockAPI');
   assert.strictEqual(body.pool.accounts['u-main-0001'].weight, 3);
   assert.strictEqual(body.pool.accounts['u-back-0002'].group, 'backup');
   assert.strictEqual(body.pool.groups['main'].priority, 0);
+  // 快过期优先开关与窗口必须随同一份 body 提交（与模式/权重同一次深合并保存）。
+  assert.strictEqual(body.pool.prefer_expiring, true);
+  assert.strictEqual(body.pool.expiring_soon, '168h');
   console.log('PICK PANEL OK');
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });
 `

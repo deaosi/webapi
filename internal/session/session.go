@@ -41,6 +41,18 @@ type Config struct {
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
 	AvailableForModel func(model string) []string
+	// Allocate 会话首次分配（未命中/绑定失效后重分配）时的选号回调，bound 为已被
+	// 其他会话绑定的 uid 列表。返回空串表示回调放弃，回落内置哈希分配。
+	//
+	// 为什么必须有这个回调：权重 / 优先级 / swrr / 成本分层 / 最早到期优先**只在
+	// pool.pickLocked 里实现**。会话路由器若自行 hashIndex 分配，会把整条选号策略
+	// 旁路掉——生产表现为：面板上把权重调成 9:1 毫无效果、/status 的 pick 分布恒为 0
+	// （实测踩过：session_sticky 默认开启 + ExtractKey 有派生回退，几乎每个请求都
+	// 走分配路径）。回调接上后，粘性分配与普通轮换共享同一套策略。
+	//
+	// 锁序：本回调在 Router 写锁内被调用，回调内会取 pool 写锁；pool 不反向依赖
+	// session（无回边），故不存在死锁环。
+	Allocate func(model string, bound []string) string
 }
 
 // Router 会话粘性路由器。
@@ -193,7 +205,23 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if len(pool2) == 0 {
 		pool2 = uids
 	}
-	uid := pool2[hashIndex(key, len(pool2))]
+	var uid string
+	// 分配优先走池子的策略选号（Allocate 回调）：权重/优先级/swrr/成本分层/最早到期
+	// 优先只在 pool.pickLocked 里实现，此处自行哈希会把整条策略旁路掉。回调收到
+	// bound（已被其他会话绑定的 uid），由回调在补集里按策略选、必要时放开重选，
+	// 从而保留"空闲优先"双段语义；返回空或返回不在可用集内的号则回落哈希。
+	if r.cfg.Allocate != nil {
+		boundList := make([]string, 0, len(bound))
+		for u := range bound {
+			boundList = append(boundList, u)
+		}
+		if cand := r.cfg.Allocate(model, boundList); cand != "" && available[cand] {
+			uid = cand
+		}
+	}
+	if uid == "" {
+		uid = pool2[hashIndex(key, len(pool2))]
+	}
 
 	prev, existed := r.entries[key]
 	r.entries[key] = entry{uid: uid, lastActive: now}

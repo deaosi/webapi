@@ -476,6 +476,12 @@ type PickPolicyView struct {
 	Groups       []PickGroupStatus   `json:"groups"`
 	Accounts     []PickAccountStatus `json:"accounts"`
 	Distribution map[string]uint64   `json:"distribution"`
+	// PreferExpiring / ExpiringSoon：「优先使用快过期积分」开关与窗口。
+	// 注意优先级——该策略开启且窗口内存在有效批次时，选号按最早到期排序，
+	// **压过下面的模式/权重/分档**（见 pickLocked 的 preferExpiring 段）。
+	// 面板据此渲染开关并提示运营：想让权重完全做主就关掉它。
+	PreferExpiring bool   `json:"prefer_expiring"`
+	ExpiringSoon   string `json:"expiring_soon"`
 }
 
 // PickPolicyStatus 组装 pick 段视图（RLock；成员数按当前池账号归属计算）。
@@ -483,9 +489,11 @@ func (p *Pool) PickPolicyStatus() PickPolicyView {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	v := PickPolicyView{
-		Mode:         string(p.pick.mode),
-		Inner:        string(p.pick.inner),
-		Distribution: map[string]uint64{},
+		Mode:           string(p.pick.mode),
+		Inner:          string(p.pick.inner),
+		Distribution:   map[string]uint64{},
+		PreferExpiring: p.preferExpiring,
+		ExpiringSoon:   p.expiringSoonLabel,
 	}
 	for k, n := range p.pickDist {
 		v.Distribution[k] = n
