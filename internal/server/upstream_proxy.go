@@ -247,16 +247,36 @@ var (
 type upstreamModelEntry struct {
 	ids []string
 	at  time.Time
+	// failed 上次拉取失败。失败用**短 TTL** 重试：成功结果可以缓存 5 分钟，
+	// 但"拉不到"如果也缓存 5 分钟，上游刚恢复也要再等 5 分钟才重新发现。
+	failed bool
 }
 
-// upstreamModelTTL 上游模型表缓存时长。
-const upstreamModelTTL = 5 * time.Minute
+const (
+	// upstreamModelTTL 成功结果缓存时长（模型表变化很慢）。
+	upstreamModelTTL = 5 * time.Minute
+	// upstreamModelFailTTL 失败结果缓存时长（够挡住重试风暴，又不至于让恢复延迟太久）。
+	upstreamModelFailTTL = 30 * time.Second
+)
 
-// FetchUpstreamModelIDs 拉取上游的模型 id 列表（GET <base>/models），带 5 分钟缓存。
+// UpstreamModelTimeoutInteractive 交互式读取（面板"拉取上游模型"/"测试渠道"按钮）的超时。
+// 人在等着看结果，可以多等一会儿。
+const UpstreamModelTimeoutInteractive = 20 * time.Second
+
+// UpstreamModelTimeoutInline 请求路径内联读取（chat 模型判定、/v1/models 列表）的超时。
 //
-// 供 /v1/models 与面板"拉取上游模型"共用。任何失败都原样返回 error，由调用方决定
-// 降级策略（网关侧退回池子目录，面板侧提示用户手填）——这里不吞错、不返回空成功。
-func FetchUpstreamModelIDs(base, key, label string) ([]string, error) {
+// 为什么要单独一个更短的上限：白名单留空时，**每个 chat 请求**都要判断"这个模型是不是
+// 该走外部上游"，判断依据就是上游模型表。若上游挂死，20 秒的等待会把业务请求一起拖住。
+// 3 秒拿不到就当作"未发现该模型"，请求安全回落账号池——宁可少用一次外部上游，
+// 也不能让一个挂掉的上游把整条链路拖死。
+const UpstreamModelTimeoutInline = 3 * time.Second
+
+// FetchUpstreamModelIDs 拉取上游的模型 id 列表（GET <base>/models），带缓存。
+//
+// 供 /v1/models、chat 的模型判定、面板"拉取上游模型"共用。任何失败都原样返回 error，
+// 由调用方决定降级策略（网关侧退回池子目录，面板侧提示用户手填）——不吞错、不返回空成功。
+// timeout 传 0 时用交互式上限。
+func FetchUpstreamModelIDs(base, key, label string, timeout time.Duration) ([]string, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("upstream url is empty")
@@ -266,12 +286,28 @@ func FetchUpstreamModelIDs(base, key, label string) ([]string, error) {
 	ck := hex.EncodeToString(sum[:])
 
 	upstreamModelMu.Lock()
-	if e, ok := upstreamModelCache[ck]; ok && time.Since(e.at) < upstreamModelTTL {
-		ids := e.ids
-		upstreamModelMu.Unlock()
-		return ids, nil
+	if e, ok := upstreamModelCache[ck]; ok {
+		ttl := upstreamModelTTL
+		if e.failed {
+			ttl = upstreamModelFailTTL
+		}
+		if time.Since(e.at) < ttl {
+			ids, failed := e.ids, e.failed
+			upstreamModelMu.Unlock()
+			if failed {
+				return nil, errors.New("上一次拉取失败（缓存中，稍后重试）")
+			}
+			return ids, nil
+		}
 	}
 	upstreamModelMu.Unlock()
+
+	// 失败也要落缓存（failT 标记），否则上游挂死时每个请求都要等一遍超时。
+	rememberFail := func() {
+		upstreamModelMu.Lock()
+		upstreamModelCache[ck] = upstreamModelEntry{at: time.Now(), failed: true}
+		upstreamModelMu.Unlock()
+	}
 
 	req, err := http.NewRequest(http.MethodGet, base+"/models", nil)
 	if err != nil {
@@ -280,18 +316,24 @@ func FetchUpstreamModelIDs(base, key, label string) ([]string, error) {
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	if timeout <= 0 {
+		timeout = UpstreamModelTimeoutInteractive
+	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
+		rememberFail()
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MiB 上限：模型表不该更大
 	if err != nil {
+		rememberFail()
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("upstream %s/modes: HTTP %d: %s", label, resp.StatusCode,
+		rememberFail()
+		return nil, fmt.Errorf("upstream %s/models: HTTP %d: %s", label, resp.StatusCode,
 			strings.TrimSpace(string(body))[:min(len(body), 200)])
 	}
 	var parsed struct {
@@ -300,6 +342,7 @@ func FetchUpstreamModelIDs(base, key, label string) ([]string, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
+		rememberFail()
 		return nil, fmt.Errorf("upstream %s/models: 响应不是 OpenAI 模型表格式: %w", label, err)
 	}
 	ids := make([]string, 0, len(parsed.Data))
@@ -319,17 +362,44 @@ func FetchUpstreamModelIDs(base, key, label string) ([]string, error) {
 	return ids, nil
 }
 
-// externalChannelModels 为外部上游渠道合成"白名单里的具体模型"条目。
+// externalChannelModels 为外部上游渠道合成 /v1/models 里该渠道提供的模型条目。
 //
-// 只列具体名字：通配条目（`glm-5*`）不是某个模型，列出去客户端也无法直接调用；
-// 白名单留空时返回空（调用方改为拉上游模型表）。
+// 数据源统一走 ChannelModelSet（与路由判定同一个口径）：白名单非空用白名单，
+// 留空用上游模型表——这样"列表里看到的"就是"真的会走这个渠道的"。
+//
+// 只列具体名字：通配条目（`*` / `glm-5*`）不是某个模型，客户端拿到也没法直接调；
+// 白名单写了 `*` 时用上游模型表把它展开成具体清单。
 func externalChannelModels(ch ChannelInfo) []map[string]any {
-	out := make([]map[string]any, 0, len(ch.Models))
-	for _, m := range ch.Models {
+	set := ChannelModelSet(ch)
+	concrete := make([]string, 0, len(set))
+	hasStar := false
+	for _, m := range set {
 		m = strings.TrimSpace(m)
-		if m == "" || strings.HasSuffix(m, "*") {
+		if m == "" {
 			continue
 		}
+		if m == "*" {
+			hasStar = true
+			continue
+		}
+		if strings.HasSuffix(m, "*") {
+			continue // 前缀通配不是具体模型名
+		}
+		concrete = append(concrete, m)
+	}
+	if hasStar {
+		if ids, err := FetchUpstreamModelIDs(ch.UpstreamURL, ch.UpstreamKey, ch.Label, UpstreamModelTimeoutInline); err == nil {
+			concrete = append(concrete, ids...)
+		}
+	}
+
+	seen := map[string]bool{}
+	out := make([]map[string]any, 0, len(concrete))
+	for _, m := range concrete {
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
 		// 外部上游的模型名不带本网关的 realm 前缀：前缀是内部路由协议，
 		// 上游与客户端都不认。id 用裸名，与 chat 侧出站口径一致。
 		out = append(out, map[string]any{

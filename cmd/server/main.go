@@ -313,7 +313,7 @@ func main() {
 			if !def.IsExternal() {
 				return nil, fmt.Errorf("渠道 %q 不是外部上游渠道（未填请求地址）", name)
 			}
-			return server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label)
+			return server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label, 0)
 		},
 		// 渠道页"测试渠道"：**逐个模型**真实探一次，返回每一项的原始状态码与响应体。
 		//
@@ -341,7 +341,7 @@ func main() {
 				}
 			}
 			if len(models) == 0 {
-				ids, err := server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label)
+				ids, err := server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label, 0)
 				if err != nil {
 					return map[string]any{"ok": false,
 						"error": "无法确定待测模型（拉取上游模型失败：" + err.Error() + "）"}

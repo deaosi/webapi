@@ -638,7 +638,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 概念（它的分组名在 pool.groups 里通常没有成员），设了会把回落请求
 			// 逼进一个空分组、直接 no_healthy_account。
 			if ch.IsExternal() {
-				if ChannelServesModel(ch.Models, bareModel) {
+				if ChannelServesModel(ch, bareModel) {
 					proxyToUpstream(w, r, ch, body, bareModel)
 					return
 				}

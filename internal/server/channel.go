@@ -65,25 +65,47 @@ func FilterChannelModels(list []map[string]any, ch ChannelInfo) []map[string]any
 	return out
 }
 
+// ChannelModelSet 返回该外部渠道**承接**的模型清单——路由判定与 /v1/models 列表共用
+// 这一个口径，避免"列表里看得到、请求却被拒"或反过来的错配。
+//
+//   - 白名单非空：就是白名单（`*` 与 `glm-5*` 这类通配按 ChannelAllowedModel 的规则生效）；
+//   - 白名单留空：**自动取上游模型表**（渠道的模型 = 上游提供的模型）。这样绑定之后
+//     列表里立刻能看到渠道模型，且"渠道的模型走上游、其余走账号池"两条同时成立。
+//
+// 留空且拉不到上游模型表时返回 nil（= 暂不承接任何模型）：请求安全回落账号池。
+// 上游不可达时宁可不用它，也不能把所有请求都往一个联系不上的上游上导。
+func ChannelModelSet(ch ChannelInfo) []string {
+	if len(ch.Models) > 0 {
+		return ch.Models
+	}
+	if !ch.IsExternal() {
+		return nil
+	}
+	ids, err := FetchUpstreamModelIDs(ch.UpstreamURL, ch.UpstreamKey, ch.Label, UpstreamModelTimeoutInline)
+	if err != nil || len(ids) == 0 {
+		return nil
+	}
+	return ids
+}
+
 // ChannelServesModel 报告**外部上游渠道**是否承接这个模型（决定走上游还是回落账号池）。
 //
 // 与 ChannelAllowedModel 的区别在语义而非实现：后者是"是否放行"（不匹配即拒绝），
 // 前者是"归谁服务"（不匹配就交给账号池）。绑定外部渠道的 key 因此可以同时用到
 // 两类模型：白名单内的走外部上游，其余继续走 WorkBuddy 账号池。
 //
-// 空名单 = **不承接任何模型**（安全默认）。这条刻意与 ChannelAllowedModel 相反：
-// 那里空名单是"全放开"（账号池渠道不限制用什么模型），这里若也全放开，效果就是
-// "绑一下就整条 key 全部改走外部上游、彻底失去账号池兜底"——上游一旦余额不足/宕机，
-// 这把 key 的所有模型一起挂掉。实测踩过两次（绑完发现"所有模型都报余额不足"），
-// 所以默认改成不做任何接管：绑定本身不改变现有行为，运维显式填了模型名才开始分流。
-//
-// 想让全部模型都走外部上游（明确的独占意图）就填 `*`：它命中下面的前缀通配，
-// 等价于"全放开"，且是**运维主动写下的**，不会被误当成"还没填"。
-func ChannelServesModel(models []string, bare string) bool {
-	if len(models) == 0 {
+// 判定依据是 ChannelModelSet 解析出的渠道模型集，而不是白名单本身——留空时它等于
+// 上游模型表，所以"上游有的模型走上游、只有池子有的模型走池子"天然成立，
+// 且与 /v1/models 列出来的东西完全一致。
+func ChannelServesModel(ch ChannelInfo, bare string) bool {
+	if !ch.IsExternal() {
 		return false
 	}
-	return ChannelAllowedModel(models, bare)
+	set := ChannelModelSet(ch)
+	if len(set) == 0 {
+		return false
+	}
+	return ChannelAllowedModel(set, bare)
 }
 
 // ChannelAllowedModel 报告裸模型名是否落在渠道白名单内（空名单 = 全放开）。

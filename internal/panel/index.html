@@ -1030,8 +1030,8 @@ select.grp-sel { max-width: 130px; }
           <label class="fld"><span class="lb">模型白名单（逗号分隔）</span>
             <input id="chEditModels" placeholder="留空=全部走外部上游；可 glm-5*" autocomplete="off">
             <span class="hint" id="chEditModelsHint">这些模型走外部上游，<strong>未列出的仍走账号池</strong>
-              ——两组模型可以同时用。<strong>留空 = 该渠道不接管任何模型</strong>（绑定后请求照旧走账号池）；
-              要让全部模型都走外部上游，就填 <code>*</code>。</span></label>
+              ——两组模型可以同时用。<strong>留空 = 自动取上游提供的全部模型</strong>（绑定后列表里就能看到）；
+              填 <code>*</code> 表示不限制、全部模型都走外部上游。</span></label>
           <div class="fld" id="chEditFetchRow" hidden>
             <button type="button" class="xs" id="chEditFetchBtn" data-act="chfetch-models">拉取上游模型</button>
             <span class="hint" id="chEditFetchNote">从上游 /models 拉当前可用模型（点一个加入白名单）</span>
