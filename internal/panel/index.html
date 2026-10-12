@@ -605,20 +605,87 @@ select.grp-sel { max-width: 130px; }
           <h4 class="sub-h">分组 <span class="hint">priority 越小越先消耗；同 priority 多组按 weight 用 SWRR 分流（必须 &gt;0）</span>
             <span class="grow"></span><button class="xs" id="btnGroupAdd">新增分组</button></h4>
           <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>分组</th><th>优先级</th><th>权重</th><th>成员</th><th>份额</th><th class="c-acts"></th></tr></thead>
+            <thead><tr><th>分组</th><th>优先级</th><th>权重</th><th>成员</th><th class="c-acts">操作</th></tr></thead>
             <tbody id="grpBody"></tbody>
           </table></div>
           <div class="hr"></div>
-          <h4 class="sub-h">账号权重 <span class="hint">weight 0 = 软摘除（不出池，只是不被选中）；key 支持全 UID 或 UID 前缀，最长匹配</span></h4>
+      <div class="box" id="pickBox">
+        <header>
+          <h3>轮询策略 <span class="hint" id="pickModeNote"></span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnPickReset" title="清零 SWRR 累积与分布计数，重新验证比例">清零计数</button>
+          <button class="xs primary" id="btnPickSave">保存策略</button>
+        </header>
+        <div class="pad">
+          <div class="grid3">
+            <label class="fld"><span class="lb">轮询模式</span>
+              <select id="pickMode">
+                <option value="weighted">weighted — Top5 加权随机（现状）</option>
+                <option value="swrr">swrr — 平滑加权轮询（严格比例）</option>
+                <option value="priority">priority — 主备分档（同档内按内层算法）</option>
+              </select></label>
+            <label class="fld"><span class="lb">同档内算法</span>
+              <select id="pickInner">
+                <option value="weighted">weighted — Top5 加权随机</option>
+                <option value="swrr">swrr — 平滑加权轮询</option>
+              </select>
+              <span class="hint">仅 priority 模式使用</span></label>
+            <div class="fld"><span class="lb">实际分布（进程内计数）</span>
+              <div id="pickDist" class="note">—</div></div>
+          </div>
+          <div class="grid2">
+            <div class="switch"><span class="lb">优先使用快过期积分</span>
+              <input type="checkbox" id="pickPreferExpiring"></div>
+            <label class="fld"><span class="lb">快过期窗口</span>
+              <input id="pickExpiringSoon" placeholder="168h" autocomplete="off">
+              <span class="hint">窗口内的批次参与到期优先；留空 / 0 = 关闭该门槛</span></label>
+          </div>
+          <p class="ak-note" id="pickExpireNote">开启且窗口内存在快过期积分时，选号按<strong>最早到期</strong>排序 ——
+            它<strong>压过</strong>下面的模式 / 权重 / 分档。想让权重完全做主就关掉它。</p>
+          <div class="hr"></div>
+          <h4 class="sub-h">分组 <span class="hint">priority 越小越先消耗；同 priority 多组按 weight 用 SWRR 分流（必须 &gt;0）</span>
+            <span class="grow"></span><button class="xs" id="btnGroupAdd">新增分组</button></h4>
           <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>账号</th><th>分组</th><th>优先级</th><th>权重</th><th>最终权重</th><th>选中</th><th>占比</th></tr></thead>
+            <thead><tr><th>分组</th><th>优先级</th><th>权重</th><th>成员</th><th class="c-acts">操作</th></tr></thead>
+            <tbody id="grpBody"></tbody>
+          </table></div>
+          <div class="hr"></div>
+          <h4 class="sub-h">账号权重 <span class="hint">weight 0 = 软摘除（不出池，只是不被选中）</span></h4>
+          <div class="tbl-wrap"><table class="acc">
+            <thead><tr><th>账号</th><th>分组</th><th>优先级</th><th>权重</th><th>最终权重</th><th>选中</th><th>占比</th><th class="c-acts">操作</th></tr></thead>
             <tbody id="pickAcctBody"></tbody>
           </table></div>
-          <p class="ak-note">保存走配置页同通道（深合并 + 热生效，无需重启）。静态权重与积分/闲置动态权重相乘；分布计数重启归零。</p>
+          <p class="ak-note">「保存策略」只保存上面的模式/算法/快过期三项；分组与账号走本行的弹窗编辑、单次入库。分布计数重启归零。</p>
           <div class="ak-error" id="pickError" role="status" hidden></div>
         </div>
       </div>
     </section>
+
+    <!-- 分组/账号权重编辑弹窗（只读表 + 弹窗编辑；与 API 密钥弹窗同交互） -->
+    <div class="veil" id="editVeil">
+      <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="editTitle">
+        <header><h3 id="editTitle">编辑</h3><div class="hint" id="editHint"></div></header>
+        <div class="body">
+          <div id="editNameRow"><label class="fld"><span class="lb">分组名</span>
+            <input id="editName" maxlength="64" placeholder="例如：main" autocomplete="off">
+            <span class="hint">创建后改名走删除+新建；账号跟随旧名迁移到无组</span></label></div>
+          <div id="editGroupSelRow" hidden><label class="fld"><span class="lb">所属分组</span>
+            <select id="editGroupSel"></select></label></div>
+          <div class="grid2">
+            <label class="fld"><span class="lb">优先级（越小越先消耗）</span>
+              <input id="editPriority" type="number" step="1" autocomplete="off"></label>
+            <label class="fld"><span class="lb">权重</span>
+              <input id="editWeight" type="number" step="0.1" min="0" autocomplete="off">
+              <span class="hint" id="editWeightHint">分组权重必须 &gt;0；账号权重 0=软摘除</span></label>
+          </div>
+          <div class="state err" id="editModalError" role="status" hidden></div>
+        </div>
+        <footer><span class="grow"></span>
+          <button type="button" class="primary" id="editSave" data-act="edit-save">保存</button>
+          <button type="button" id="editCancel" data-act="edit-cancel">取消</button>
+        </footer>
+      </div>
+    </div>
 
     <!-- 任务中心 -->
     <section class="view" id="view-taskscenter" hidden>
@@ -875,11 +942,11 @@ select.grp-sel { max-width: 130px; }
           <h4 class="sub-h">渠道定义 <span class="hint">分组名需与账号池里的分组一致；成员数来自当前账号池</span>
             <span class="grow"></span><button class="xs" id="btnChGroupAdd">新增渠道</button></h4>
           <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>分组名</th><th>展示名</th><th>上游域</th><th>模型白名单</th><th>成员</th><th>状态</th><th class="c-acts"></th></tr></thead>
+            <thead><tr><th>渠道</th><th>上游域</th><th>模型白名单</th><th>成员</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
             <tbody id="chGroupBody"></tbody>
           </table></div>
           <div class="hr"></div>
-          <h4 class="sub-h">密钥分组绑定 <span class="hint">每个调用密钥可绑定一个渠道分组；留「（不限制）」即全池可用</span></h4>
+          <h4 class="sub-h">密钥分组绑定 <span class="hint">每个调用密钥走弹窗绑定一个渠道分组；解绑即全池可用</span></h4>
           <div class="tbl-wrap"><table class="acc">
             <thead><tr><th>密钥名称</th><th>密钥前缀</th><th>绑定渠道分组</th><th>实际生效</th></tr></thead>
             <tbody id="chKeyBody"></tbody>
@@ -890,6 +957,54 @@ select.grp-sel { max-width: 130px; }
         </div>
       </div>
     </section>
+
+    <!-- 渠道新建/编辑弹窗 -->
+    <div class="veil" id="chEditVeil">
+      <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="chEditTitle">
+        <header><h3 id="chEditTitle">新增渠道</h3><div class="hint" id="chEditHint"></div></header>
+        <div class="body">
+          <label class="fld"><span class="lb">分组名（渠道标识）</span>
+            <input id="chEditName" maxlength="64" placeholder="例如：vip" autocomplete="off">
+            <span class="hint">与账号池的分组名一致；创建后改名走删除+新建</span></label>
+          <label class="fld"><span class="lb">展示名</span>
+            <input id="chEditLabel" maxlength="80" placeholder="（同分组名）" autocomplete="off"></label>
+          <div class="grid2">
+            <label class="fld"><span class="lb">上游域</span>
+              <select id="chEditRealm">
+                <option value="">（不限）</option>
+                <option value="cn">cn</option>
+                <option value="global">global</option>
+              </select></label>
+            <div class="fld"><span class="lb">启用</span>
+              <label class="sel-note"><input type="checkbox" id="chEditEnabled"> 该渠道可用</label></div>
+          </div>
+          <label class="fld"><span class="lb">模型白名单（逗号分隔）</span>
+            <input id="chEditModels" placeholder="留空=不限，可 glm-5*" autocomplete="off"></label>
+          <div class="state err" id="chEditModalError" role="status" hidden></div>
+        </div>
+        <footer><span class="grow"></span>
+          <button type="button" class="primary" id="chEditSave" data-act="chedit-save">保存</button>
+          <button type="button" id="chEditCancel" data-act="chedit-cancel">取消</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- 密钥绑定弹窗 -->
+    <div class="veil" id="keyBindVeil">
+      <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="keyBindTitle">
+        <header><h3 id="keyBindTitle">绑定密钥</h3><div class="hint" id="keyBindHint"></div></header>
+        <div class="body">
+          <label class="fld"><span class="lb">绑定到渠道分组</span>
+            <select id="keyBindSel"></select>
+            <span class="hint">选「不限制」即解绑，该密钥恢复全池可用</span></label>
+          <div class="state err" id="keyBindModalError" role="status" hidden></div>
+        </div>
+        <footer><span class="grow"></span>
+          <button type="button" class="primary" id="keyBindSave" data-act="keybind-save">保存</button>
+          <button type="button" id="keyBindCancel" data-act="keybind-cancel">取消</button>
+        </footer>
+      </div>
+    </div>
 
     <!-- 配置 -->
     <section class="view" id="view-config" hidden>

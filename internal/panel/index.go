@@ -45,16 +45,22 @@ func setSecurityHeaders(w http.ResponseWriter) {
 }
 
 // index 输出面板页面（静态无秘密；数据接口 /panel/api/* 才走鉴权）。
+// index.html 与 app.js 带 Cache-Control: no-store：面板是 go:embed 进二进制的静态
+// 资源，新版本部署后浏览器必须拿新的，否则会出现"新后端 + 旧 app.js"错配——
+// 典型症状就是用户点了保存、服务端 200、页面行为却像没生效。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(indexHTML)
 }
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
+// 同上加 no-store：index.html 引用的是相对路径 app.js，同源同缓存策略。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(appJS)

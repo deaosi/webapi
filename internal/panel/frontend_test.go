@@ -609,37 +609,50 @@ run('api = mockAPI');
   assert(rows.includes('主号A'), '账号列应显示昵称');
   assert(rows.includes('备号B'), '账号列应显示昵称');
   assert(rows.includes('u-back-0002'.slice(0, 16)), '短 uid 应作次行显示');
-  // 权重输入框必须带真实值：Go 端字段名与前端读取不一致时会渲染成空串，
-  // 而空串在保存侧等价于"摘除整池"（见下方空值用例）。
-  assert(rows.includes('data-f="weight" value="3"'), '权重框应带当前值 3');
-  assert(rows.includes('data-f="weight" value="1"'), '权重框应带当前值 1');
+  // 只读表：权重是文本列而非输入框（行内 input 已删，编辑走弹窗）；旧 DOM 的
+  // data-f="weight" 输入框必须消失，否则"并发写盘"老路还在。
+  assert(!rows.includes('data-f="weight"'), '账号表不得再有行内权重输入框');
+  assert(rows.includes('data-act="acct-edit"'), '账号行应有编辑按钮（弹窗入口）');
+  assert(get('grpBody').innerHTML.includes('data-act="grp-edit"'), '分组行应有编辑按钮（弹窗入口）');
   assert(rows.includes('12.50'));
   assert(rows.includes('75%'));
-  // 保存：body 必须带 pool.pick_mode/accounts/groups 三键。
-  // 注意 savePick 成功后会 fire-and-forget 触发 loadOverview（记一条 overview 请求），
-  // 故用 find 定位 config 请求而非 at(-1)。
+  // 保存策略：只含模式/算法/快过期四键——不再从 DOM 全量回读分组与账号。
+  // 注意 savePick 成功后会触发 loadOverview（记一条 overview 请求），
+  // 故按 method 找 POST。
   await run('savePick()');
-  const last = requests.find(r => r.path === 'config');
-  assert(last, 'savePick 应提交 config 请求');
-  const body = JSON.parse(last.body);
+  const posts = requests.filter(r => r.path === 'config' && r.method === 'POST');
+  assert.strictEqual(posts.length, 1, 'savePick 应恰提交一次 config POST');
+  const body = JSON.parse(posts[0].body);
   assert.strictEqual(body.pool.pick_mode, 'priority');
   assert.strictEqual(body.pool.pick_inner, 'swrr');
-  assert.strictEqual(body.pool.accounts['u-main-0001'].weight, 3);
-  assert.strictEqual(body.pool.accounts['u-back-0002'].group, 'backup');
-  assert.strictEqual(body.pool.groups['main'].priority, 0);
-  // 快过期优先开关与窗口必须随同一份 body 提交（与模式/权重同一次深合并保存）。
   assert.strictEqual(body.pool.prefer_expiring, true);
   assert.strictEqual(body.pool.expiring_soon, '168h');
-
-  // 空权重框 = 不修改，绝不能落成 0（weight 0 = 软摘除；一次保存会把整池摘空 → 全站 503）。
-  const before = requests.filter(r => r.path === 'config').length;
-  acctInputs[2].value = ''; // u-main-0001 的权重被清空
-  await run('savePick()');
-  const cfgs = requests.filter(r => r.path === 'config');
-  assert.strictEqual(cfgs.length, before + 1, '清空后仍应提交一次保存');
-  const b2 = JSON.parse(cfgs[cfgs.length - 1].body);
-  assert.strictEqual(b2.pool.accounts['u-main-0001'].weight, undefined,
-    '空权重必须"不提交"（深合并保持原值），而不是写成 0');
+  assert.strictEqual(body.pool.accounts, undefined, '策略保存不得再碰 accounts（走弹窗单次入库）');
+  assert.strictEqual(body.pool.groups, undefined, '策略保存不得再碰 groups（走弹窗单次入库）');
+  // 分组弹窗提交：改 main 的权重，只动这一条分组。
+  run('editGroupModal("edit", "main")');
+  get('editWeight').value = '5';
+  get('editPriority').value = '0';
+  await run('editSubmit()');
+  const gposts = requests.filter(r => r.path === 'config' && r.method === 'POST');
+  assert.strictEqual(gposts.length, 2, '分组弹窗提交应再有一次 config POST');
+  const gb = JSON.parse(gposts[1].body);
+  // pushPoolPatch 读盘（mock 返回 {ok:true} 无 config → 空表），只写入改动的分组。
+  assert.strictEqual(gb.pool.groups.main.weight, 5, '分组弹窗只改该条分组');
+  // 账号弹窗提交：改 u-back-0002 的权重与分组。
+  // 先重设 overviewData：前面的 editSubmit 成功后调了 loadOverview，而桩的 overview
+  // 无 pick 字段（pickState.pick 会被清空导致找不到行）。这是桩的局限，不是实现 bug。
+  run('overviewData = ' + JSON.stringify(pickFixture));
+  run('editAcctModal("u-back-0002")');
+  get('editWeight').value = '2';
+  get('editPriority').value = '10';
+  get('editGroupSel').value = 'main';
+  await run('editSubmit()');
+  const aposts = requests.filter(r => r.path === 'config' && r.method === 'POST');
+  assert.strictEqual(aposts.length, 3, '账号弹窗提交应再有一次 config POST');
+  const ab = JSON.parse(aposts[2].body);
+  assert.strictEqual(ab.pool.accounts['u-back-0002'].weight, 2, '账号弹窗只改该账号');
+  assert.strictEqual(ab.pool.accounts['u-back-0002'].group, 'main');
   console.log('PICK PANEL OK');
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });
 `
@@ -786,21 +799,28 @@ run('api = mockAPI');
   const khtml = get('chKeyBody').innerHTML;
   assert(khtml.indexOf('对外A') >= 0, '绑定行应带密钥名称而不是裸 prefix');
   assert(khtml.indexOf('sk-wb2a-aaaa1111') >= 0, '绑定行应带密钥前缀');
-  assert(khtml.indexOf('限 2 个账号') >= 0, '绑定的生效列应显示可用的成员数');
+  assert(khtml.indexOf('限 main') >= 0, '绑定的生效列应显示可用的分组与成员数');
   assert(khtml.indexOf('已禁用') >= 0, '禁用的 key 应有标记');
-  // 保存：channels 段必须是完整状态（enabled/groups/keys 全有）。
-  // 注意 saveChannels 成功后还会 await loadChannels（记三条 GET），定位必须按 method 找 POST。
-  await run('saveChannels()');
+  assert(khtml.indexOf('data-act="key-bind"') >= 0, '绑定行应有“绑定”按钮（弹窗编辑入口）');
+  assert(ghtml.indexOf('data-act="ch-edit"') >= 0, '渠道行应有“编辑”按钮（弹窗编辑入口）');
+  // 渠道编辑弹窗提交：改 main 的 label+白名单，只动这一条定义。
+  run('chEditModal("edit", "main")');
+  get('chEditLabel').value = '主渠道V2';
+  get('chEditModels').value = 'glm-5*, deepseek-v3';
+  get('chEditRealm').value = 'cn';
+  await run('chEditSubmit()');
+  // 密钥绑定弹窗提交：key-2 绑到 main。
+  run('keyBindModal("key-2")');
+  get('keyBindSel').value = 'main';
+  await run('keyBindSubmit()');
   const posts = requests.filter(r => r.path === 'config' && r.method === 'POST');
-  assert.strictEqual(posts.length, 1, 'saveChannels 应恰提交一次 config POST');
-  const body = JSON.parse(posts[0].body);
-  assert.strictEqual(body.channels.enabled, true);
-  assert.deepStrictEqual(body.channels.groups.main.models, ['glm-5*', 'deepseek-v3']);
-  assert.strictEqual(body.channels.keys['key-1'], 'main');
-  // key-2 选了「不限制」→ keys 里必须没有它（留空键 = 解绑，且不能发空串）。
-  assert.strictEqual(body.channels.keys['key-2'], undefined);
-  // 白名单校验：realm 非法由服务端拦，这里只断言客户端组装了完整形态。
-  assert(body.channels.groups.dead.enabled === false, '停用标记必须随保存发出');
+  assert(posts.length >= 2, '两次弹窗提交应各有一次 config POST，实得 ' + posts.length);
+  const chPost = JSON.parse(posts[0].body);
+  assert.strictEqual(chPost.channels.groups.main.label, '主渠道V2', '渠道编辑应只改该条定义');
+  assert.deepStrictEqual(chPost.channels.groups.main.models, ['glm-5*', 'deepseek-v3']);
+  const kbPost = JSON.parse(posts[posts.length - 1].body);
+  assert.strictEqual(kbPost.channels.keys['key-2'], 'main', '绑定弹窗只动该 key');
+  assert.strictEqual(kbPost.channels.keys['key-1'], 'main', '整段带回：既有绑定不能丢');
   console.log('CHANNELS PANEL OK');
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });
 `

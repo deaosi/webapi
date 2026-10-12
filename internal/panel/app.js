@@ -529,21 +529,20 @@ async function loadOverview(quiet) {
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
-    // pick 面板编辑态保护：用户正在改权重时后台刷新不覆盖输入；保存/切页后 dirty 清零。
-    if (!pickState.dirty) {
-      pickState.pick = d.pick || null;
-      renderPick();
-    } else {
-      // 脏态下仍更新分布计数（只读部分），不碰输入框。
+    // 表已是只读渲染：每次刷新直接重绘；只有"策略四控件"（模式/算法/开关/窗口）有 dirty
+    // 保护——用户正在改那四个值时后台刷新不覆盖。分组/账号编辑走弹窗单次入库，无此问题。
+    if (pickState.dirty) {
       if (d.pick && pickState.pick) {
         pickState.pick.distribution = d.pick.distribution;
-        pickState.pick.accounts = (pickState.pick.accounts || []).map(a => {
-          const fresh = (d.pick.accounts || []).find(x => x.uid === a.uid);
-          if (fresh) { a.w_final = fresh.w_final; a.picks = fresh.picks; }
-          return a;
-        });
+        pickState.pick.mode = d.pick.mode;
+        pickState.pick.inner = d.pick.inner;
+        pickState.pick.prefer_expiring = d.pick.prefer_expiring;
+        pickState.pick.expiring_soon = d.pick.expiring_soon;
       }
+    } else {
+      pickState.pick = d.pick || null;
     }
+    renderPick();
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
@@ -599,6 +598,28 @@ $('btnActivityAll').onclick = async () => {
 // （热生效）。accounts key 支持全 UID 或前缀，面板按“账号 UID 全串”回写（最长
 // 匹配天然覆盖旧前缀键，被覆盖的前缀键随深合并保留——保存后提示用户检查）。
 const pickState = { pick: null, dirty: false };
+
+// poolPatchChain 串行门闩：同一时刻只允许一个"读盘→改→写盘"在飞。为什么必须串行——
+// pushPoolPatch 是"读到旧盘再回写整 subtree"，两个 flight 交错（A 读盘、B 读盘、
+// A 写盘、B 写盘）会让先写的修改被后写的整盘覆盖，静默丢一次操作。
+let poolPatchChain = Promise.resolve();
+
+// pushPoolPatch 读盘合并后再写回 pool.accounts/groups（整体替换语义，即删即删）。
+// 用途：分组/账号的增删改这类"单个小操作直接入库"，不再经过"页面级 dirty + 全量保存"。
+// mutator 收到 { accounts, groups } 两个可变对象，就地改即可；空输入不碰对应键。
+function pushPoolPatch(mutator) {
+  const run = poolPatchChain.then(async () => {
+    const cfg = await api('config');
+    const pool = (cfg && cfg.config && cfg.config.pool) || {};
+    const accounts = Object.assign({}, pool.accounts || {});
+    const groups = Object.assign({}, pool.groups || {});
+    mutator({ accounts, groups });
+    return api('config', { method: 'POST', body: JSON.stringify({ pool: { accounts, groups } }) });
+  });
+  // 链不断：失败只拒绝本次调用，下一位照常执行。
+  poolPatchChain = run.catch(() => {});
+  return run;
+}
 function pickData() {
   return (pickState.pick) || (overviewData && overviewData.pick) || null;
 }
@@ -634,17 +655,18 @@ function renderPick() {
   $('pickDist').textContent = total
     ? Object.keys(dist).sort().map(u => u.slice(0, 8) + ' ' + dist[u] + '次(' + Math.round(dist[u] / total * 100) + '%)').join(' · ')
     : '暂无 pick 记录（发请求后刷新可见）';
-  // 分组表
+  // 分组表（只读 + 编辑/删除按钮；新建编辑走弹窗 editGroupModal）
   const groups = pickGroups();
   $('grpBody').innerHTML = groups.length ? groups.map(g => {
-    const share = ''; // 组份额：成员 picks 汇总在分布条，组行只给成员数
-    return '<tr><td><input data-grp-name="' + esc(g.name) + '" value="' + esc(g.name) + '" aria-label="组名"></td>' +
-      '<td><input class="num-sm" type="number" step="1" data-grp="' + esc(g.name) + '" data-f="priority" value="' + g.priority + '" aria-label="优先级"></td>' +
-      '<td><input class="num-sm" type="number" step="0.1" min="0" data-grp="' + esc(g.name) + '" data-f="weight" value="' + g.weight + '" aria-label="权重"></td>' +
-      '<td class="num">' + g.members + '</td><td>' + share + '</td>' +
-      '<td><button class="xs ghost danger" data-act="grp-del" data-g="' + esc(g.name) + '">删除</button></td></tr>';
-  }).join('') : '<tr><td colspan="6"><div class="empty">无分组（账号直比）。点「新增分组」创建主备组。</div></td></tr>';
-  // 账号权重表
+    const tdisp = '优先级 ' + g.priority + ' · 权重 ' + g.weight;
+    return '<tr><td class="who"><div class="nm">' + esc(g.name) + '</div></td>' +
+      '<td class="num">' + g.priority + '</td>' +
+      '<td class="num">' + g.weight + '</td>' +
+      '<td class="num" title="' + esc(tdisp) + '">' + g.members + '</td><td>' +
+      '<button class="xs ghost" data-act="grp-edit" data-g="' + esc(g.name) + '">编辑</button> ' +
+      '<button class="xs ghost danger" data-act="grp-del" data-g="' + esc(g.name) + '">删除</button></td></tr>';
+  }).join('') : '<tr><td colspan="5"><div class="empty">无分组（账号直比）。点「新增分组」创建主备组。</div></td></tr>';
+  // 账号权重表（只读 + 编辑按钮；权重/分组/优先级走弹窗 editAcctModal）
   const rows = pickAcctRows();
   const tot = rows.reduce((a, r) => a + Number(r.picks || 0), 0);
   const groupNames = groups.map(g => g.name);
@@ -652,25 +674,22 @@ function renderPick() {
     const uid = String(r.uid || '');
     const short = uid.length > 16 ? uid.slice(0, 16) + '…' : uid;
     const pct = tot ? Math.round((r.picks || 0) / tot * 100) : 0;
-    const grpOpts = '<option value="">（无）</option>' + groupNames.map(n =>
-      '<option value="' + esc(n) + '"' + (r.group === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
-    // 权重缺省 1：Go 端 weight 为 *float64，nil 时序列化为 1（routeWeight 已解析），
-    // 故 r.weight 恒为数字；仍兜一层，避免老服务端/异常载荷把输入框渲染成空串
-    // （空串会被 savePick 的 Number('') 读成 0 = 软摘除，是个静默灾难）。
     const wv = Number(r.weight);
     const weightVal = Number.isFinite(wv) ? wv : 1;
     const wTag = weightVal === 0 ? ' <span class="tag bad">摘除</span>' : '';
+    const grpTag = r.group ? esc(r.group) : '<span class="note">（无）</span>';
     const nm = r.nickname
       ? esc(r.nickname)
       : '<span style="color:var(--ink-3)">未命名</span>';
     return '<tr title="uid: ' + esc(uid) + '">' +
       '<td class="who"><div class="nm">' + nm + '</div><div class="id">' + esc(short) + '</div></td>' +
-      '<td><select class="grp-sel" data-uid="' + esc(uid) + '" data-f="group">' + grpOpts + '</select></td>' +
-      '<td><input class="num-sm" type="number" step="1" data-uid="' + esc(uid) + '" data-f="priority" value="' + r.priority + '" aria-label="优先级"></td>' +
-      '<td><input class="num-sm" type="number" step="0.1" min="0" data-uid="' + esc(uid) + '" data-f="weight" value="' + weightVal + '" aria-label="权重">' + wTag + '</td>' +
+      '<td>' + grpTag + '</td>' +
+      '<td class="num">' + r.priority + '</td>' +
+      '<td class="num">' + weightVal + wTag + '</td>' +
       '<td class="num" title="w_base × weight_cfg">' + (Number(r.w_final || 0).toFixed(2)) + '</td>' +
       '<td class="num">' + (r.picks || 0) + '次</td>' +
-      '<td><div class="pick-share" title="' + pct + '%"><i style="width:' + pct + '%"></i></div></td></tr>';
+      '<td><div class="pick-share" title="' + pct + '%"><i style="width:' + pct + '%"></i></div>' +
+      '<button class="xs ghost" data-act="acct-edit" data-u="' + esc(uid) + '">编辑</button></td></tr>';
   }).join('') : '<tr><td colspan="7"><div class="empty">池是空的</div></td></tr>';
 }
 function pickErr(msg) {
@@ -682,91 +701,185 @@ $('btnPickReset').onclick = async () => {
   catch (e) { toast(e.message, 'err'); }
 };
 $('btnGroupAdd').onclick = () => {
-  const d = pickData();
-  if (!d) return;
-  const base = 'group';
-  let i = (d.groups || []).length + 1, name = base + i;
-  const names = new Set((d.groups || []).map(g => g.name));
-  while (names.has(name)) { i++; name = base + i; }
-  d.groups = (d.groups || []).concat([{ name, priority: 10, weight: 1, members: 0 }]);
-  pickState.dirty = true;
-  renderPick();
+  editGroupModal('create');
 };
 document.addEventListener('click', ev => {
-  const b = ev.target.closest('button[data-act="grp-del"]');
+  const b = ev.target.closest && ev.target.closest('button[data-act]');
   if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'grp-edit') { editGroupModal('edit', b.dataset.g); return; }
+  if (act === 'acct-edit') { editAcctModal(b.dataset.u); return; }
+  if (act === 'grp-del') { grpDelete(b.dataset.g); return; }
+});
+// ── 分组 / 账号编辑弹窗（只读表 + 弹窗编辑，NewAPI 渠道页同款交互） ──
+// 设计：行内 input 全删（6-8 个并发写盘 + 组名改名映射，全是断裂点）。
+// 新增/编辑 → 弹窗填完 → pushPoolPatch 读盘改盘一次写入 → loadOverview(true) 刷新。
+const editState = {
+  kind: '',        // 'group' | 'acct'
+  uid: '',         // acct 编辑时：账号 UID；group 编辑时：原分组名
+  modalOpen: false, saving: false, opener: null,
+};
+function pickAcctByUID(uid) {
+  return pickAcctRows().find(r => String(r.uid) === String(uid)) || null;
+}
+function openVeil(id) { $(id).classList.add('on'); }
+function closeVeil(id) { $(id).classList.remove('on'); }
+
+// editGroupModal 打开分组编辑弹窗：mode=create 时 name 可填，edit 时锁定原名。
+function editGroupModal(mode, name) {
   const d = pickData();
-  if (!d) return;
-  const g = b.dataset.g;
-  d.groups = (d.groups || []).filter(x => x.name !== g);
-  // 落空组成员回到无组（回写时 group:""）。
-  pickState.dirty = true;
-  renderPick();
+  const list = (d && d.groups) || [];
+  const row = mode === 'edit' ? list.find(g => g.name === name) : null;
+  if (mode === 'edit' && !row) { toast('分组不存在，可能已被其他窗口删除', 'err'); loadOverview(true); return; }
+  editState.kind = 'group'; editState.uid = mode === 'edit' ? row.name : '';
+  editState.modalOpen = true; editState.saving = false;
+  editState.opener = document.activeElement;
+  $('editTitle').textContent = mode === 'create' ? '新增分组' : '编辑分组「' + row.name + '」';
+  $('editNameRow').hidden = false;
+  $('editName').disabled = mode === 'edit';
+  $('editName').value = mode === 'edit' ? row.name : suggestGroupName(list);
+  $('editPriority').value = mode === 'edit' ? row.priority : 10;
+  $('editWeight').value = mode === 'edit' ? row.weight : 1;
+  $('editGroupSelRow').hidden = true;
+  $('editHint').textContent = mode === 'create'
+    ? '分组只是路由名：建好后，到下面的账号表里把账号划进该分组。'
+    : '改优先级/权重即时按 pushPoolPatch 入库；改名走删除+新建（账号跟随迁移）。';
+  $('editModalError').hidden = true; $('editModalError').textContent = '';
+  $('editSave').disabled = false; $('editSave').textContent = mode === 'create' ? '创建' : '保存';
+  openVeil('editVeil');
+  $('editName').focus();
+}
+// editAcctModal 打开账号权重编辑弹窗：分组下拉取当前分组列表。
+function editAcctModal(uid) {
+  const row = pickAcctByUID(uid);
+  if (!row) { toast('账号不存在，可能刚刚被移除', 'err'); loadOverview(true); return; }
+  editState.kind = 'acct'; editState.uid = row.uid;
+  editState.modalOpen = true; editState.saving = false;
+  editState.opener = document.activeElement;
+  $('editTitle').textContent = '编辑账号权重' + (row.nickname ? '「' + row.nickname + '」' : '');
+  $('editNameRow').hidden = true;
+  $('editGroupSelRow').hidden = false;
+  const sel = $('editGroupSel');
+  const names = pickGroups().map(g => g.name);
+  sel.innerHTML = '<option value="">（无）</option>' + names.map(n =>
+    '<option value="' + esc(n) + '"' + (row.group === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
+  $('editPriority').value = row.priority;
+  const wv = Number(row.weight);
+  $('editWeight').value = Number.isFinite(wv) ? wv : 1;
+  $('editHint').textContent = '权重 0 = 软摘除（该号直接不参与选号）。改完点保存即入库，无需再点页面级保存。';
+  $('editModalError').hidden = true; $('editModalError').textContent = '';
+  $('editSave').disabled = false; $('editSave').textContent = '保存';
+  openVeil('editVeil');
+  $('editPriority').focus();
+}
+function suggestGroupName(list) {
+  const names = new Set((list || []).map(g => g.name));
+  let i = (list || []).length + 1, name = 'group' + i;
+  while (names.has(name)) { i++; name = 'group' + i; }
+  return name;
+}
+function closeEditModal(restoreFocus) {
+  if (restoreFocus === undefined) restoreFocus = true;
+  if (editState.saving) return;
+  editState.modalOpen = false; editState.kind = ''; editState.uid = ''; editState.name = '';
+  $('editModalError').hidden = true; $('editModalError').textContent = '';
+  closeVeil('editVeil');
+  if (restoreFocus && editState.opener && editState.opener.isConnected) editState.opener.focus();
+  editState.opener = null;
+}
+// editSubmit 弹窗提交：只允许走 pushPoolPatch（读盘→改盘→整 subtree 回写的一次 POST）。
+// 与旧 savePick（内存 dirty + 全量 POST）彻底分离，避免两种写盘路径交错覆盖。
+async function editSubmit() {
+  if (editState.saving || !editState.modalOpen) return;
+  $('editModalError').hidden = true;
+  const fail = msg => { $('editModalError').textContent = msg; $('editModalError').hidden = false; };
+  if (editState.kind === 'group') {
+    const name = String(($('editName').disabled ? editState.uid : $('editName').value) || '').trim();
+    if (!name) { fail('分组名不能为空'); $('editName').focus(); return; }
+    const pri = Math.trunc(Number(String($('editPriority').value).trim()));
+    if (!Number.isFinite(pri)) { fail('优先级必须是整数'); $('editPriority').focus(); return; }
+    const w = Number(String($('editWeight').value).trim());
+    if (!Number.isFinite(w) || w <= 0) { fail('分组权重必须 >0 的数字'); $('editWeight').focus(); return; }
+    editState.saving = true; $('editSave').disabled = true; $('editSave').textContent = '保存中…';
+    try {
+      await pushPoolPatch(({ groups }) => {
+        groups[name] = { priority: pri, weight: w };
+      });
+      toast('分组「' + name + '」已保存', 'ok');
+      closeEditModal(false);
+      loadOverview(true);
+    } catch (e) { fail(e.message); toast('保存失败：' + e.message, 'err'); }
+    finally { editState.saving = false; $('editSave').disabled = false; $('editSave').textContent = '保存'; }
+    return;
+  }
+  if (editState.kind === 'acct') {
+    const uid = editState.uid;
+    const g = String($('editGroupSel').value || '');
+    const pri = Math.trunc(Number(String($('editPriority').value).trim()));
+    if (!Number.isFinite(pri)) { fail('优先级必须是整数'); $('editPriority').focus(); return; }
+    const w = Number(String($('editWeight').value).trim());
+    if (!Number.isFinite(w) || w < 0) { fail('权重必须 ≥0 的数字（0=软摘除）'); $('editWeight').focus(); return; }
+    editState.saving = true; $('editSave').disabled = true; $('editSave').textContent = '保存中…';
+    try {
+      await pushPoolPatch(({ accounts }) => {
+        accounts[uid] = { priority: pri, weight: w, group: g };
+      });
+      toast('账号权重已保存', 'ok');
+      closeEditModal(false);
+      loadOverview(true);
+    } catch (e) { fail(e.message); toast('保存失败：' + e.message, 'err'); }
+    finally { editState.saving = false; $('editSave').disabled = false; $('editSave').textContent = '保存'; }
+    return;
+  }
+}
+// grpDelete 删除分组：pushPoolPatch 同一次写盘里删组 + 解绑该组成员（服务端整体替换）。
+async function grpDelete(name) {
+  if (!name) return;
+  if (!confirm('删除分组「' + name + '」？该组成员自动回到无组。')) return;
+  pickErr('');
+  try {
+    await pushPoolPatch(({ accounts, groups }) => {
+      delete groups[name];
+      for (const uid of Object.keys(accounts)) {
+        const cur = accounts[uid];
+        const grp = (cur && typeof cur === 'object') ? String(cur.group || '') : '';
+        if (grp === name) {
+          accounts[uid] = { priority: (cur || {}).priority || 0, weight: ('weight' in (cur || {})) ? cur.weight : 1, group: '' };
+        }
+      }
+    });
+    toast('分组「' + name + '」已删除', 'ok');
+    loadOverview(true);
+  } catch (e) { pickErr(e.message); toast('删除失败：' + e.message, 'err'); }
+}
+$('btnChReload').onclick = loadChannels;
+document.addEventListener('click', ev => {
+  const veil = ev.target;
+  if (veil === $('editVeil')) { closeEditModal(); return; }
+  if (veil === $('chEditVeil')) { closeChEditModal(); return; }
+  if (veil === $('keyBindVeil')) { closeKeyBindModal(); return; }
+  const b = veil.closest && veil.closest('button[data-act]');
+  if (!b || b.disabled) return;
+  const act = b.dataset.act;
+  if (act === 'edit-save') { editSubmit(); return; }
+  if (act === 'edit-cancel') { closeEditModal(); return; }
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape') return;
+  if (editState.modalOpen) { ev.preventDefault(); closeEditModal(); return; }
 });
 async function savePick() {
-  const d = pickData();
-  if (!d) return;
+  // 「保存策略」只保存模式/算法/快过期开关与窗口（页面级 4 个控件）。
+  // 分组与账号权重走各自弹窗的 pushPoolPatch 单次入库，两条写盘路径彻底分离——
+  // 不再从 DOM 全量回读，避免"内存脏态 + 全量 POST"把弹窗提交覆盖掉。
   pickErr('');
   const btn = $('btnPickSave');
   btn.disabled = true; btn.textContent = '保存中…';
   try {
-    // 从 DOM 读回编辑值（账号行按 UID 全串回写；分组行按当前名回写）。
-    // 空输入 = 不修改该项（跳过不提交），**绝不**当作 0：weight 为 0 的语义是"软摘除"，
-    // 一旦把空框读成 0，一次保存就会把整池账号静默摘除（选号返回 nil → 全站 503）。
-    // 深合并保存下"漏提交某键"即保持原值，正是想要的语义。
-    const accounts = {};
-    document.querySelectorAll('#pickAcctBody [data-uid]').forEach(el => {
-      const uid = el.dataset.uid, f = el.dataset.f;
-      accounts[uid] = accounts[uid] || { priority: 0, group: '' };
-      const raw = String(el.value == null ? '' : el.value).trim();
-      if (f === 'weight') {
-        if (raw === '') return; // 不修改
-        const v = Number(raw);
-        if (!Number.isFinite(v) || v < 0) throw new Error('权重必须 ≥0 的数字（' + uid.slice(0, 8) + '）');
-        accounts[uid].weight = v;
-      } else if (f === 'priority') {
-        if (raw === '') return; // 不修改
-        const v = Math.trunc(Number(raw));
-        if (!Number.isFinite(v)) throw new Error('优先级必须是整数（' + uid.slice(0, 8) + '）');
-        accounts[uid].priority = v;
-      } else if (f === 'group') {
-        accounts[uid].group = String(el.value || '');
-      }
-    });
-    const groups = {};
-    const seenGrp = new Set();
-    document.querySelectorAll('#grpBody [data-grp]').forEach(el => {
-      const g = el.dataset.grp, f = el.dataset.f;
-      if (seenGrp.has(g + '\x00' + f)) return;
-      // 组名可改：以同行 name 输入框为准。
-      const row = el.closest('tr');
-      const nameEl = row ? row.querySelector('[data-grp-name]') : null;
-      const name = String((nameEl && nameEl.value) || g).trim();
-      if (!name) throw new Error('组名不能为空');
-      groups[name] = groups[name] || { priority: 0, weight: 1 };
-      const raw = String(el.value == null ? '' : el.value).trim();
-      if (f === 'priority') {
-        if (raw === '') return; // 不修改
-        const v = Math.trunc(Number(raw));
-        if (!Number.isFinite(v)) throw new Error('分组优先级必须是整数（' + name + '）');
-        groups[name].priority = v;
-      } else if (f === 'weight') {
-        if (raw === '') return; // 不修改
-        const v = Number(raw);
-        if (!Number.isFinite(v) || v <= 0) throw new Error('分组权重必须 >0（' + name + '）');
-        groups[name].weight = v;
-      }
-      seenGrp.add(g + '\x00' + f);
-    });
-    // 账号引用的组若已被删：回退无组（不硬拦，避免删组卡死保存）。
-    for (const uid of Object.keys(accounts)) {
-      if (accounts[uid].group && !groups[accounts[uid].group]) accounts[uid].group = '';
-    }
     const body = { pool: {
       pick_mode: $('pickMode').value, pick_inner: $('pickInner').value,
       prefer_expiring: !!($('pickPreferExpiring') || {}).checked,
-      expiring_soon: String(($('pickExpiringSoon') || {}).value || '').trim(),
-      accounts, groups } };
+      expiring_soon: String(($('pickExpiringSoon') || {}).value || '').trim() } };
     const r = await api('config', { method: 'POST', body: JSON.stringify(body) });
     const n = (r.restart_required || []).length;
     toast(n ? '策略已保存，其中 ' + n + ' 项需重启' : '策略已保存并立即生效', 'ok');
@@ -776,8 +889,15 @@ async function savePick() {
   finally { btn.disabled = false; btn.textContent = '保存策略'; }
 }
 $('btnPickSave').onclick = savePick;
+// dirty 只保护模式/算法/开关三个控件（loadOverview 刷新时不覆盖正在编辑的值）。
+// 分组与账号表已是只读渲染，无 dirty 概念：编辑走弹窗、单次入库。
 document.addEventListener('change', ev => {
-  if (ev.target.closest && ev.target.closest('#pickBox')) pickState.dirty = true;
+  if (ev.target.closest && ev.target.closest('#pickBox')) {
+    const t = ev.target;
+    if (t && (t.id === 'pickMode' || t.id === 'pickInner' || t.id === 'pickPreferExpiring' || t.id === 'pickExpiringSoon')) {
+      pickState.dirty = true;
+    }
+  }
 });
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
@@ -2503,7 +2623,7 @@ function renderChannels() {
     ? ('共 ' + names.length + ' 个渠道定义 · ' + Object.keys(chState.keys).length + ' 条密钥绑定')
     : '正在加载…';
 
-  // 渠道定义表
+  // 渠道定义表（只读 + 编辑/删除；新建编辑走弹窗 chEditModal）
   $('chGroupBody').innerHTML = names.length ? names.map(n => {
     const d = chState.defs[n] || {};
     const members = channelMemberNames(n);
@@ -2512,27 +2632,22 @@ function renderChannels() {
       ? '<span class="tag ok">' + members.length + ' 个</span>'
       : '<span class="tag warn">无成员</span>';
     const eTag = enabled ? '' : ' <span class="tag bad">停用</span>';
+    const wl = chModelListText(d.models);
     return '<tr title="成员：' + esc(members.join('、') || '（无）') + '">' +
-      '<td><input data-chg="' + esc(n) + '" data-f="name" value="' + esc(n) + '" aria-label="分组名"></td>' +
-      '<td><input data-chg="' + esc(n) + '" data-f="label" value="' + esc(d.label || '') + '" placeholder="（同分组名）" aria-label="展示名"></td>' +
-      '<td><select data-chg="' + esc(n) + '" data-f="realm">' +
-        ['', 'cn', 'global'].map(r => '<option value="' + r + '"' + ((d.realm || '') === r ? ' selected' : '') + '>' +
-          (r === '' ? '（不限）' : r) + '</option>').join('') + '</select></td>' +
-      '<td><input data-chg="' + esc(n) + '" data-f="models" value="' + esc(chModelListText(d.models)) +
-        '" placeholder="留空=不限，逗号分隔，可 glm-5*" aria-label="模型白名单"></td>' +
+      '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div></td>' +
+      '<td>' + ((d.realm || '') === '' ? '<span class="note">（不限）</span>' : esc(d.realm)) + '</td>' +
+      '<td>' + (wl ? esc(wl) : '<span class="note">（不限）</span>') + '</td>' +
       '<td>' + mTag + '</td>' +
-      '<td><label class="sel-note"><input type="checkbox" data-chg="' + esc(n) + '" data-f="enabled"' +
-        (enabled ? ' checked' : '') + '> 启用</label>' + eTag + '</td>' +
-      '<td><button class="xs ghost danger" data-act="ch-del" data-g="' + esc(n) + '">删除</button></td></tr>';
-  }).join('') : '<tr><td colspan="7"><div class="empty">还没有渠道。点「新增渠道」创建一个分组渠道，' +
+      '<td><span class="tag ' + (enabled ? 'ok">启用' : 'bad">停用') + '</span>' + eTag + '</td>' +
+      '<td><button class="xs ghost" data-act="ch-edit" data-g="' + esc(n) + '">编辑</button> ' +
+      '<button class="xs ghost danger" data-act="ch-del" data-g="' + esc(n) + '">删除</button></td></tr>';
+  }).join('') : '<tr><td colspan="6"><div class="empty">还没有渠道。点「新增渠道」创建一个分组渠道，' +
       '再到账号池把账号归入该分组。</div></td></tr>';
 
-  // 密钥绑定表
+  // 密钥绑定表（只读生效列 + 绑定按钮走弹窗；下拉选择走独立 saveKeyGroup 单次入库）
   const keys = chState.keyList;
   $('chKeyBody').innerHTML = keys.length ? keys.map(k => {
     const bound = chState.keys[k.id] || '';
-    const opts = ['<option value="">（不限制）</option>'].concat(names.map(n =>
-      '<option value="' + esc(n) + '"' + (bound === n ? ' selected' : '') + '>' + esc(n) + '</option>')).join('');
     let eff;
     if (!bound) {
       eff = chState.enabled ? '<span class="note">全池可用（未绑定）</span>' : '<span class="note">渠道隔离已关闭</span>';
@@ -2542,7 +2657,7 @@ function renderChannels() {
       eff = '<span class="tag bad">渠道已停用 → 请求 403</span>';
     } else {
       const cnt = channelMemberNames(bound).length;
-      eff = cnt ? '<span class="tag ok">限 ' + cnt + ' 个账号</span>'
+      eff = cnt ? '<span class="tag ok">限 ' + esc(bound) + ' · ' + cnt + ' 个账号</span>'
                 : '<span class="tag warn">该分组无成员账号 → 请求失败</span>';
     }
     const disabled = k.enabled === false;
@@ -2550,8 +2665,8 @@ function renderChannels() {
       '<td class="who"><div class="nm">' + esc(k.name || '（未命名）') +
         (disabled ? ' <span class="tag bad">已禁用</span>' : '') + '</div></td>' +
       '<td class="who"><div class="id">' + esc(k.prefix || '') + '…</div></td>' +
-      '<td><select data-chk="' + esc(k.id) + '">' + opts + '</select></td>' +
-      '<td>' + eff + '</td></tr>';
+      '<td>' + (bound ? esc(bound) : '<span class="note">（不限制）</span>') + '</td>' +
+      '<td>' + eff + ' <button class="xs ghost" data-act="key-bind" data-id="' + esc(k.id) + '">绑定</button></td></tr>';
   }).join('') : '<tr><td colspan="4"><div class="empty">还没有调用密钥。先到「API 密钥」页创建。</div></td></tr>';
 }
 
@@ -2592,80 +2707,189 @@ async function loadChannels() {
   }
 }
 
-function chErr(msg) {
-  const el = $('chError');
+// ── 渠道编辑 / 密钥绑定弹窗（只读表 + 弹窗编辑，NewAPI 渠道页同款交互） ──
+// 两条独立写盘链，各自"读盘→改→整 channels 回写"，不再有"整页脏态 + 全量 POST"：
+//   - chEditSubmit：渠道定义增改（groups 整表回写，keys 原样带回）
+//   - chDelete：删渠道 + 同次写盘解绑该组密钥（服务端整体替换，天然一致）
+//   - keyBindSubmit：单密钥绑定/解绑（keys 差量合并后整表回写）
+// chEnabled 总开关单独一条：saveChannelsEnabled 只改 enabled 位。
+const chEditState = { mode: '', name: '', modalOpen: false, saving: false, opener: null };
+const keyBindState = { id: '', modalOpen: false, saving: false, opener: null };
+function chEditErr(msg) {
+  const el = $('chEditModalError');
   el.textContent = msg; el.hidden = !msg;
 }
-
-$('btnChReload').onclick = loadChannels;
-$('btnChGroupAdd').onclick = () => {
+function keyBindErr(msg) {
+  const el = $('keyBindModalError');
+  el.textContent = msg; el.hidden = !msg;
+}
+function chEditModal(mode, name) {
   if (!chState.loaded) return;
+  const row = mode === 'edit' ? (chState.defs[name] || null) : null;
+  if (mode === 'edit' && !row) { toast('渠道不存在，可能已被其他窗口删除', 'err'); loadChannels(); return; }
+  chEditState.mode = mode; chEditState.name = mode === 'edit' ? name : '';
+  chEditState.modalOpen = true; chEditState.saving = false;
+  chEditState.opener = document.activeElement;
+  $('chEditTitle').textContent = mode === 'create' ? '新增渠道' : '编辑渠道「' + name + '」';
+  const nm = $('chEditName');
+  nm.disabled = mode === 'edit';
+  nm.value = mode === 'edit' ? name : suggestChannelName();
+  $('chEditLabel').value = (row && row.label) || '';
+  $('chEditRealm').value = (row && row.realm) || '';
+  $('chEditModels').value = chModelListText((row && row.models) || []);
+  $('chEditEnabled').checked = !row || row.enabled !== false;
+  $('chEditHint').textContent = mode === 'create'
+    ? '建好后，到账号池把账号划进该分组，成员数随后显示。'
+    : '改名走删除+新建；该渠道绑定的密钥保持原分组名（需另行调整）。';
+  chEditErr('');
+  $('chEditSave').disabled = false; $('chEditSave').textContent = mode === 'create' ? '创建' : '保存';
+  $('chEditVeil').classList.add('on');
+  nm.focus();
+}
+function suggestChannelName() {
   let i = Object.keys(chState.defs).length + 1, name = 'channel' + i;
   while (chState.defs[name]) { i++; name = 'channel' + i; }
-  chState.defs[name] = { label: '', realm: '', models: [], enabled: true };
-  chState.dirty = true;
-  renderChannels();
-};
-document.addEventListener('click', ev => {
-  const b = ev.target.closest && ev.target.closest('button[data-act="ch-del"]');
-  if (!b) return;
-  const name = b.dataset.g;
-  delete chState.defs[name];
-  // 该分组的绑定同步解绑：否则配置会被"绑定到未定义分组"的校验拒绝（fail closed）。
-  for (const id of Object.keys(chState.keys)) {
-    if (chState.keys[id] === name) delete chState.keys[id];
-  }
-  chState.dirty = true;
-  renderChannels();
-});
-document.addEventListener('change', ev => {
-  if (ev.target.closest && ev.target.closest('#view-channels')) chState.dirty = true;
-});
-
-async function saveChannels() {
-  if (!chState.loaded) return;
+  return name;
+}
+function closeChEditModal(restoreFocus) {
+  if (restoreFocus === undefined) restoreFocus = true;
+  if (chEditState.saving) return;
+  chEditState.modalOpen = false; chEditState.mode = ''; chEditState.name = '';
+  chEditErr('');
+  $('chEditVeil').classList.remove('on');
+  if (restoreFocus && chEditState.opener && chEditState.opener.isConnected) chEditState.opener.focus();
+  chEditState.opener = null;
+}
+async function chEditSubmit() {
+  if (chEditState.saving || !chEditState.modalOpen) return;
+  chEditErr('');
+  const name = String(($('chEditName').disabled ? chEditState.name : $('chEditName').value) || '').trim();
+  if (!name) { chEditErr('分组名不能为空'); $('chEditName').focus(); return; }
+  const realm = String($('chEditRealm').value || '');
+  if (realm !== '' && realm !== 'cn' && realm !== 'global') { chEditErr('上游域只能是 cn / global / 不限'); return; }
+  const models = String($('chEditModels').value || '').split(',').map(s => s.trim()).filter(Boolean);
+  const label = String($('chEditLabel').value || '').trim();
+  const enabled = !!$('chEditEnabled').checked;
+  chEditState.saving = true; $('chEditSave').disabled = true; $('chEditSave').textContent = '保存中…';
+  try {
+    const body = await readChannelsFull();
+    body.groups = body.groups || {};
+    body.groups[name] = { label, realm, models, enabled };
+    const r = await api('config', { method: 'POST', body: JSON.stringify({ channels: body }) });
+    toast('渠道「' + name + '」已保存', 'ok');
+    closeChEditModal(false);
+    await loadChannels();
+  } catch (e) { chEditErr(e.message); toast('保存失败：' + e.message, 'err'); }
+  finally { chEditState.saving = false; $('chEditSave').disabled = false; $('chEditSave').textContent = '保存'; }
+}
+async function chDelete(name) {
+  if (!name) return;
+  if (!confirm('删除渠道「' + name + '」？绑定到该分组的密钥会自动解绑。')) return;
+  chErr('');
+  try {
+    const body = await readChannelsFull();
+    delete (body.groups || {})[name];
+    for (const id of Object.keys(body.keys || {})) {
+      if (body.keys[id] === name) delete body.keys[id];
+    }
+    await api('config', { method: 'POST', body: JSON.stringify({ channels: body }) });
+    toast('渠道「' + name + '」已删除', 'ok');
+    await loadChannels();
+  } catch (e) { chErr(e.message); toast('删除失败：' + e.message, 'err'); }
+}
+// keyBindModal 单密钥绑定弹窗：下拉选分组（含"不限制"=解绑），提交只动该 key。
+function keyBindModal(id) {
+  const k = (chState.keyList || []).find(x => x.id === id);
+  if (!k) { toast('密钥不存在，可能刚刚被删除', 'err'); loadChannels(); return; }
+  keyBindState.id = id;
+  keyBindState.modalOpen = true; keyBindState.saving = false;
+  keyBindState.opener = document.activeElement;
+  $('keyBindTitle').textContent = '绑定密钥「' + (k.name || k.prefix || id.slice(0, 8)) + '」';
+  const cur = chState.keys[id] || '';
+  $('keyBindSel').innerHTML = '<option value="">（不限制，全池可用）</option>' + chGroupNames().map(n =>
+    '<option value="' + esc(n) + '"' + (cur === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
+  $('keyBindHint').textContent = cur
+    ? '当前绑定到「' + cur + '」。改选即切换，选"不限制"即解绑。'
+    : '未绑定：该密钥全池可用。选一个分组即只走同组账号。';
+  keyBindErr('');
+  $('keyBindSave').disabled = false; $('keyBindSave').textContent = '保存';
+  $('keyBindVeil').classList.add('on');
+  $('keyBindSel').focus();
+}
+function closeKeyBindModal(restoreFocus) {
+  if (restoreFocus === undefined) restoreFocus = true;
+  if (keyBindState.saving) return;
+  keyBindState.modalOpen = false; keyBindState.id = '';
+  keyBindErr('');
+  $('keyBindVeil').classList.remove('on');
+  if (restoreFocus && keyBindState.opener && keyBindState.opener.isConnected) keyBindState.opener.focus();
+  keyBindState.opener = null;
+}
+async function keyBindSubmit() {
+  if (keyBindState.saving || !keyBindState.modalOpen) return;
+  keyBindErr('');
+  const id = keyBindState.id;
+  const g = String($('keyBindSel').value || '');
+  if (g && !chState.defs[g]) { keyBindErr('分组「' + g + '」不存在，请先创建渠道'); return; }
+  keyBindState.saving = true; $('keyBindSave').disabled = true; $('keyBindSave').textContent = '保存中…';
+  try {
+    const body = await readChannelsFull();
+    body.keys = body.keys || {};
+    if (g) body.keys[id] = g;
+    else delete body.keys[id];
+    await api('config', { method: 'POST', body: JSON.stringify({ channels: body }) });
+    toast(g ? '已绑定到「' + g + '」' : '已解绑，全池可用', 'ok');
+    closeKeyBindModal(false);
+    await loadChannels();
+  } catch (e) { keyBindErr(e.message); toast('保存失败：' + e.message, 'err'); }
+  finally { keyBindState.saving = false; $('keyBindSave').disabled = false; $('keyBindSave').textContent = '保存'; }
+}
+// readChannelsFull 读盘拿 channels 整段（groups/keys/enabled 原样带回，
+// 弹窗只改自己负责的键——整段回写靠服务端整体替换语义落地）。
+async function readChannelsFull() {
+  const cfg = await api('config');
+  const ch = (cfg && cfg.config && cfg.config.channels) || {};
+  return {
+    enabled: ch.enabled !== false,
+    groups: Object.assign({}, ch.groups || {}),
+    keys: Object.assign({}, ch.keys || {}),
+  };
+}
+// saveChannelsEnabled 总开关单独保存（整段带回，只翻 enabled 位）。
+async function saveChannelsEnabled() {
   chErr('');
   const btn = $('btnChSave');
   btn.disabled = true; btn.textContent = '保存中…';
   try {
-    // 从 DOM 回读渠道定义（整页提交 = channels 段整体替换，删除才是有效的）。
-    const defs = {};
-    document.querySelectorAll('#chGroupBody [data-chg]').forEach(el => {
-      const row = el.closest('tr');
-      if (!row) return;
-      const nameEl = row.querySelector('[data-f="name"]');
-      const name = String((nameEl && nameEl.value) || '').trim();
-      if (!name) throw new Error('分组名不能为空');
-      const labelEl = row.querySelector('[data-f="label"]');
-      const realmEl = row.querySelector('[data-f="realm"]');
-      const modelsEl = row.querySelector('[data-f="models"]');
-      const enabledEl = row.querySelector('[data-f="enabled"]');
-      defs[name] = {
-        label: String((labelEl && labelEl.value) || '').trim(),
-        realm: String((realmEl && realmEl.value) || ''),
-        models: String((modelsEl && modelsEl.value) || '')
-          .split(',').map(s => s.trim()).filter(Boolean),
-        enabled: !!(enabledEl && enabledEl.checked),
-      };
-    });
-    // 绑定：以密钥 ID 为键（面板写入稳定标识；前缀写法仍可手改配置）。
-    const keys = {};
-    document.querySelectorAll('#chKeyBody [data-chk]').forEach(sel => {
-      const g = String(sel.value || '');
-      if (g) keys[sel.dataset.chk] = g;
-    });
-    for (const ref of Object.keys(keys)) {
-      if (!defs[keys[ref]]) {
-        throw new Error('绑定指向未定义的渠道分组 ' + keys[ref] + '（先创建该渠道）');
-      }
-    }
-    const body = { channels: { enabled: !!$('chEnabled').checked, groups: defs, keys } };
-    const r = await api('config', { method: 'POST', body: JSON.stringify(body) });
+    const body = await readChannelsFull();
+    body.enabled = !!$('chEnabled').checked;
+    const r = await api('config', { method: 'POST', body: JSON.stringify({ channels: body }) });
     const n = (r.restart_required || []).length;
-    toast(n ? '渠道设置已保存，其中 ' + n + ' 项需重启' : '渠道设置已保存并立即生效', 'ok');
-    chState.dirty = false;
+    toast(n ? '已保存，其中 ' + n + ' 项需重启' : '已保存并立即生效', 'ok');
     await loadChannels();
   } catch (e) { chErr(e.message); toast('保存失败：' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '保存渠道设置'; }
 }
-$('btnChSave').onclick = saveChannels;
+$('btnChSave').onclick = saveChannelsEnabled;
+$('btnChReload').onclick = loadChannels;
+$('btnChGroupAdd').onclick = () => { chEditModal('create'); };
+document.addEventListener('click', ev => {
+  const veil = ev.target;
+  if (veil === $('chEditVeil')) { closeChEditModal(); return; }
+  if (veil === $('keyBindVeil')) { closeKeyBindModal(); return; }
+  const b = veil.closest && veil.closest('button[data-act]');
+  if (!b || b.disabled) return;
+  const act = b.dataset.act;
+  if (act === 'ch-edit') { chEditModal('edit', b.dataset.g); return; }
+  if (act === 'ch-del') { chDelete(b.dataset.g); return; }
+  if (act === 'key-bind') { keyBindModal(b.dataset.id); return; }
+  if (act === 'chedit-save') { chEditSubmit(); return; }
+  if (act === 'chedit-cancel') { closeChEditModal(); return; }
+  if (act === 'keybind-save') { keyBindSubmit(); return; }
+  if (act === 'keybind-cancel') { closeKeyBindModal(); return; }
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape') return;
+  if (chEditState.modalOpen) { ev.preventDefault(); closeChEditModal(); return; }
+  if (keyBindState.modalOpen) { ev.preventDefault(); closeKeyBindModal(); return; }
+});
