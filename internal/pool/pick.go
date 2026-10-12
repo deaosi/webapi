@@ -14,44 +14,74 @@ import (
 // Pick 单一选号入口（无请求级轮换、无 realm 过滤，模型感知缺省账号级）。
 // 需要请求级轮换（tried）或分池（realm）时用 PickExcludingForRealm。
 func (p *Pool) Pick() *auth.Auth {
-	return p.pickLocked(nil, "", "")
+	return p.pickLocked(nil, "", "", "")
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
 // 挑选策略：healthy 账号中按权重取前 5 名，再在 Top5 内按同一权重加权随机抽签，
 // 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
-	return p.pickLocked(tried, "", "")
+	return p.pickLocked(tried, "", "", "")
 }
 
 // PickExcludingForModel 模型感知选号：等同 PickExcluding，但对「6004 模型级冷却中的
 // 账号」进行模型豁免——请求模型与其 trigger 模型不同时视为可用（issue #31）。
 // reqModel 为空时即普通 PickExcluding（不影响既有调用语义）。
 func (p *Pool) PickExcludingForModel(tried map[string]bool, reqModel string) *auth.Auth {
-	return p.pickLocked(tried, reqModel, "")
+	return p.pickLocked(tried, reqModel, "", "")
 }
 
 // PickExcludingForRealm 模型感知 + 分池选号：候选集先按 Realm()==realm 过滤
 // （realm 空 = 不过滤，退化为 PickExcludingForModel），再按模型健康口径判定。
 // 供 handler 在 global/cn 双域下分流（global 模型请求只路由 global 账号）。
 func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm string) *auth.Auth {
-	return p.pickLocked(tried, reqModel, realm)
+	return p.pickLocked(tried, reqModel, realm, "")
+}
+
+// PickExcludingForRealmGroup 在指定账号分组内选号（上游渠道隔离，NewAPI 口径：
+// key → 分组 → 渠道账号）。
+//
+// group == "" 等价于 PickExcludingForRealm（不限制，主密钥与未绑定 key 走这条）。
+// **严格语义**：分组内没有 healthy 账号时直接返回 nil，不跨组回落——包括全冷却兜底
+// 也只在组内选。跨组借号会让分组隔离形同虚设（A 组 key 打到 B 组账号）。
+func (p *Pool) PickExcludingForRealmGroup(tried map[string]bool, reqModel, realm, group string) *auth.Auth {
+	return p.pickLocked(tried, reqModel, realm, group)
+}
+
+// UIDInGroup 报告账号是否属于指定分组（group == "" 恒 true）。
+//
+// 供粘性命中路径做隔离兜底：绑定建立后运营可能把账号移出分组/改组，绑定仍指向旧号，
+// 若不在命中点校验，严格分组隔离会被会话粘性绕过（这是"严格"与"粘性"的唯一交界面）。
+func (p *Pool) UIDInGroup(uid, group string) bool {
+	if group == "" {
+		return true
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if _, ok := p.byUID[uid]; !ok {
+		return false
+	}
+	return routeGroup(p.pick.accounts, uid) == group
 }
 
 // pickLocked 在 healthy 候选集中按权重策略选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。
+// group 非空时候选过滤叠加「账号静态分组 == group」谓词（上游渠道隔离）。
 //
 // 命名带 Locked 后缀（同 reviveCoolingLocked/pickEarliestExpiryLocked 惯例）：
 // Pool 结构体已有 pick 字段（pickPolicy 策略表），方法不能同名。
-func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.Auth {
+func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm, group string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
 	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
-	healthyOf := func(e *entry) bool { return realmOK(e) && e.healthy(now) }
+	groupOK := func(e *entry) bool {
+		return group == "" || routeGroup(p.pick.accounts, e.a.UID) == group
+	}
+	healthyOf := func(e *entry) bool { return realmOK(e) && groupOK(e) && e.healthy(now) }
 	if reqModel != "" {
-		healthyOf = func(e *entry) bool { return realmOK(e) && e.healthyForModel(now, reqModel) }
+		healthyOf = func(e *entry) bool { return realmOK(e) && groupOK(e) && e.healthyForModel(now, reqModel) }
 	}
 	var cands []*entry
 	for uid, e := range p.byUID {
@@ -73,7 +103,8 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now, realm)
+		// group 一并透传：渠道隔离下兜底同样只在组内选（跨组借号=隔离失效）。
+		return p.pickEarliestExpiryLocked(tried, now, realm, group)
 	}
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -271,11 +302,15 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
 // 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm string) *auth.Auth {
+// group 非空时兜底也只在同分组内选（渠道严格隔离，不跨组借号）。
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, group string) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
+		}
+		if group != "" && routeGroup(p.pick.accounts, uid) != group {
+			continue // 渠道隔离：兜底不跨组
 		}
 		if realm != "" && e.a.Realm() != realm {
 			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底

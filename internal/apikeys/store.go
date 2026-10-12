@@ -30,6 +30,8 @@ var (
 
 const (
 	secretPrefix = "sk-wb2a-"
+	// SecretPrefix 是调用密钥的明文前缀（导出：渠道绑定要按"ID 还是前缀"分流写法）。
+	SecretPrefix = secretPrefix
 	maxStoreSize = 16 << 20
 )
 

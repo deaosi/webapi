@@ -185,6 +185,10 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	// Channels 上游渠道（NewAPI 口径：key → 分组 → 渠道账号）。缺省全空 = 不启用
+	// （所有 key 不限制分组，现状零回归）。类型与校验见 channels.go。
+	Channels Channels `json:"channels"`
+
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
@@ -259,6 +263,9 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	// Channels.Enabled 缺省 true：但 Keys 为空时没有任何绑定，功能零影响。只有
+	// 显式 false 才把整套渠道绑定挂起（所有 key 视为未绑定）。
+	c.Channels.Enabled = true
 	return c
 }
 
@@ -485,6 +492,10 @@ func (c *Config) normalize() error {
 		return err
 	}
 	if err := pool.ValidateRoutes(c.Pool.Accounts, c.Pool.Groups); err != nil {
+		return err
+	}
+	// 上游渠道段：分组名/realm/白名单/绑定的分组必须已定义（fail closed）。
+	if err := normalizeChannels(&c.Channels); err != nil {
 		return err
 	}
 	if c.Pool.BreakerThreshold <= 0 {

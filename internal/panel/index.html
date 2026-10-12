@@ -506,6 +506,9 @@ select.grp-sel { max-width: 130px; }
       <li><a href="#apikeys" data-view="apikeys">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.5" cy="5.5" r="3.3"/><path d="m8 8 5.6 5.6M10.2 10.2l1.7-1.7M12 12l1.7-1.7"/></svg>
         API 密钥</a></li>
+      <li><a href="#channels" data-view="channels">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4.2h12M2 8h12M2 11.8h12"/><circle cx="5" cy="4.2" r="1.6"/><circle cx="10.5" cy="11.8" r="1.6"/></svg>
+        上游渠道</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
@@ -846,6 +849,41 @@ select.grp-sel { max-width: 130px; }
         <div class="ak-page" id="akPager" hidden><span class="note" id="akPageNote"></span>
           <button type="button" class="xs" id="akPrev" data-act="ak-prev">上一页</button>
           <button type="button" class="xs" id="akNext" data-act="ak-next">下一页</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 上游渠道 -->
+    <section class="view" id="view-channels" hidden>
+      <div class="box">
+        <header>
+          <h3>上游渠道 <span class="hint" id="chNote"></span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnChReload">刷新</button>
+          <button class="xs primary" id="btnChSave">保存渠道设置</button>
+        </header>
+        <div class="pad">
+          <div class="switch"><span class="lb">启用渠道隔离</span>
+            <input type="checkbox" id="chEnabled"></div>
+          <p class="ak-note">渠道 = 一个账号分组 + 该组的上游属性（上游域 / 模型白名单 / 启停）。
+            成员账号在<strong>账号池</strong>页的「分组」列指定；绑定了分组的密钥<strong>只能</strong>用同组账号，
+            组内无可用即返回错误，<strong>不会</strong>借用其他分组的账号。未绑定分组的密钥不受限制。</p>
+          <div class="hr"></div>
+          <h4 class="sub-h">渠道定义 <span class="hint">分组名需与账号池里的分组一致；成员数来自当前账号池</span>
+            <span class="grow"></span><button class="xs" id="btnChGroupAdd">新增渠道</button></h4>
+          <div class="tbl-wrap"><table class="acc">
+            <thead><tr><th>分组名</th><th>展示名</th><th>上游域</th><th>模型白名单</th><th>成员</th><th>状态</th><th class="c-acts"></th></tr></thead>
+            <tbody id="chGroupBody"></tbody>
+          </table></div>
+          <div class="hr"></div>
+          <h4 class="sub-h">密钥分组绑定 <span class="hint">每个调用密钥可绑定一个渠道分组；留「（不限制）」即全池可用</span></h4>
+          <div class="tbl-wrap"><table class="acc">
+            <thead><tr><th>密钥名称</th><th>密钥前缀</th><th>绑定渠道分组</th><th>实际生效</th></tr></thead>
+            <tbody id="chKeyBody"></tbody>
+          </table></div>
+          <p class="ak-note">白名单留空 = 不限模型；支持 <code>glm-5*</code> 这样的前缀通配。上游域留空 = 不限，
+            填 <code>cn</code>/<code>global</code> 时该密钥只能走对应域（显式写错域的模型名会被拒绝）。</p>
+          <div class="ak-error" id="chError" role="status" hidden></div>
         </div>
       </div>
     </section>

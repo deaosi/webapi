@@ -41,8 +41,15 @@ type Config struct {
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
 	AvailableForModel func(model string) []string
+	// AvailableForModelScoped 带渠道分组 scope 的可用集（scope 为空 = 不限组，等价于
+	// AvailableForModel）。nil 时回落 AvailableForModel，再回落 Available。
+	//
+	// 为什么需要 scope：绑定了上游渠道分组的调用密钥只在同组账号内选号（严格隔离）。
+	// 粘性路由的"可用性校验"与"首次分配"都必须同口径过滤，否则绑定会把请求引到组外账号。
+	AvailableForModelScoped func(model, scope string) []string
 	// Allocate 会话首次分配（未命中/绑定失效后重分配）时的选号回调，bound 为已被
-	// 其他会话绑定的 uid 列表。返回空串表示回调放弃，回落内置哈希分配。
+	// 其他会话绑定的 uid 列表，scope 为渠道分组（空 = 不限）。返回空串表示回调放弃，
+	// 回落内置哈希分配。
 	//
 	// 为什么必须有这个回调：权重 / 优先级 / swrr / 成本分层 / 最早到期优先**只在
 	// pool.pickLocked 里实现**。会话路由器若自行 hashIndex 分配，会把整条选号策略
@@ -52,7 +59,7 @@ type Config struct {
 	//
 	// 锁序：本回调在 Router 写锁内被调用，回调内会取 pool 写锁；pool 不反向依赖
 	// session（无回边），故不存在死锁环。
-	Allocate func(model string, bound []string) string
+	Allocate func(model string, bound []string, scope string) string
 }
 
 // Router 会话粘性路由器。
@@ -146,19 +153,27 @@ func (r *Router) LoadFromStore() {
 // Resolve 返回会话 key 应绑定的账号 uid，ok=false 表示当前无可用账号。
 // 无模型维度（等价于 ResolveForModel(key, "")），保留给不关心模型的调用方。
 func (r *Router) Resolve(key string) (string, bool) {
-	return r.ResolveForModel(key, "")
+	return r.ResolveForModelScoped(key, "", "")
 }
 
-// ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
+// ResolveForModel 无渠道分组维度（scope 空）的粘性解析，既有调用方语义不变。
+func (r *Router) ResolveForModel(key, model string) (string, bool) {
+	return r.ResolveForModelScoped(key, model, "")
+}
+
+// ResolveForModelScoped 返回会话 key 在该模型 + 渠道分组下应绑定的账号 uid。
 // 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
-// 被该模型限流）走重新分配。
+// 被该模型限流/不在该分组内）走重新分配。
 //
 // 为什么必须带模型：绑定只记 uid，同一个会话可能换模型；账号被 6004 模型级限额后
 // 对其他模型仍可用（见 pool.healthyForModel 的 softRateModel 豁免）。若只按账号级
 // 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
-func (r *Router) ResolveForModel(key, model string) (string, bool) {
+//
+// 为什么必须带 scope（渠道分组）：调用密钥绑定分组后只允许用同组账号（严格隔离）。
+// scope 为空 = 不限组（主密钥 / 未绑定 key），行为与引入前逐字一致。
+func (r *Router) ResolveForModelScoped(key, model, scope string) (string, bool) {
 	now := time.Now()
-	available := r.availableSet(model)
+	available := r.availableSetScoped(model, scope)
 
 	// ── Fast path: RLock 快查 ──────────────────────────────
 	r.mu.RLock()
@@ -185,7 +200,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		delete(r.entries, key) // 失效：清掉再分配
 	}
 
-	uids := r.availableSlice(model)
+	uids := r.availableSliceScoped(model, scope)
 	if len(uids) == 0 {
 		return "", false
 	}
@@ -215,7 +230,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		for u := range bound {
 			boundList = append(boundList, u)
 		}
-		if cand := r.cfg.Allocate(model, boundList); cand != "" && available[cand] {
+		if cand := r.cfg.Allocate(model, boundList, scope); cand != "" && available[cand] {
 			uid = cand
 		}
 	}
@@ -294,9 +309,11 @@ func (r *Router) gcOnce(now time.Time) int {
 	return len(expiredKeys)
 }
 
-// availableSet 把 AvailableForModel(model) 的有序列表转集合（快路径命中校验用）。
-func (r *Router) availableSet(model string) map[string]bool {
-	uids := r.availableSlice(model)
+// availableSetScoped 把 availableSliceScoped 的有序列表转集合（快路径命中校验用）。
+// scope 一并透传：绑定了渠道分组的会话，其"绑定号是否仍可用"的判定必须同口径过滤，
+// 否则账号被移出分组后快路径仍会放行（隔离被粘性命中绕过）。
+func (r *Router) availableSetScoped(model, scope string) map[string]bool {
+	uids := r.availableSliceScoped(model, scope)
 	set := make(map[string]bool, len(uids))
 	for _, u := range uids {
 		set[u] = true
@@ -304,8 +321,12 @@ func (r *Router) availableSet(model string) map[string]bool {
 	return set
 }
 
-// availableSlice 安全调用 AvailableForModel；未注入时回落 Available（nil 视空池）。
-func (r *Router) availableSlice(model string) []string {
+// availableSliceScoped 安全调用 AvailableForModelScoped；未注入 scoped 回调时回落
+// AvailableForModel，再回落 Available（老装配零回归，nil 视空池）。
+func (r *Router) availableSliceScoped(model, scope string) []string {
+	if r.cfg.AvailableForModelScoped != nil {
+		return r.cfg.AvailableForModelScoped(model, scope)
+	}
 	if r.cfg.AvailableForModel != nil {
 		return r.cfg.AvailableForModel(model)
 	}

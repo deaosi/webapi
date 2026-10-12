@@ -10,21 +10,21 @@ import (
 	"time"
 )
 
-func newTestRouter(t *testing.T, avail []string, allocate func(string, []string) string) *Router {
+func newTestRouter(t *testing.T, avail []string, allocate func(string, []string, string) string) *Router {
 	t.Helper()
 	return New(Config{
-		TTL:        time.Minute,
-		GCInterval: time.Minute,
-		Available:  func() []string { return avail },
+		TTL:               time.Minute,
+		GCInterval:        time.Minute,
+		Available:         func() []string { return avail },
 		AvailableForModel: func(string) []string { return avail },
-		Allocate:   allocate,
+		Allocate:          allocate,
 	})
 }
 
 // 回调返回的号必须被直接采用（而不是回落哈希）。
 func TestAllocateCallbackUsed(t *testing.T) {
 	var gotModel string
-	r := newTestRouter(t, []string{"a", "b", "c"}, func(model string, _ []string) string {
+	r := newTestRouter(t, []string{"a", "b", "c"}, func(model string, _ []string, _ string) string {
 		gotModel = model
 		return "c"
 	})
@@ -37,7 +37,7 @@ func TestAllocateCallbackUsed(t *testing.T) {
 	}
 	// 再次解析同一 key 走快路径命中，不应再调回调。
 	r2calls := 0
-	r.cfg.Allocate = func(string, []string) string { r2calls++; return "a" }
+	r.cfg.Allocate = func(string, []string, string) string { r2calls++; return "a" }
 	if uid2, ok := r.ResolveForModel("k1", "cn:glm-5.2"); !ok || uid2 != "c" {
 		t.Fatalf("粘性命中应保持 c: uid=%q ok=%v", uid2, ok)
 	}
@@ -48,7 +48,7 @@ func TestAllocateCallbackUsed(t *testing.T) {
 
 // 回调返回空串 → 回落内置哈希分配（行为与无回调一致：结果必在可用集内）。
 func TestAllocateEmptyFallsBack(t *testing.T) {
-	r := newTestRouter(t, []string{"a", "b"}, func(string, []string) string { return "" })
+	r := newTestRouter(t, []string{"a", "b"}, func(string, []string, string) string { return "" })
 	uid, ok := r.ResolveForModel("k1", "")
 	if !ok {
 		t.Fatal("空回调应回落哈希分配而非失败")
@@ -60,7 +60,7 @@ func TestAllocateEmptyFallsBack(t *testing.T) {
 
 // 回调返回不在可用集内的号 → 拒绝并回落（防回调与 available 口径不一致时粘到坏号）。
 func TestAllocateRejectsUnavailable(t *testing.T) {
-	r := newTestRouter(t, []string{"a", "b"}, func(string, []string) string { return "zzz" })
+	r := newTestRouter(t, []string{"a", "b"}, func(string, []string, string) string { return "zzz" })
 	uid, ok := r.ResolveForModel("k1", "")
 	if !ok {
 		t.Fatal("越界号应回落而非失败")
@@ -77,7 +77,7 @@ func TestAllocateRejectsUnavailable(t *testing.T) {
 func TestAllocateReceivesBound(t *testing.T) {
 	var seen []string
 	pick := "a"
-	r := newTestRouter(t, []string{"a", "b"}, func(_ string, bound []string) string {
+	r := newTestRouter(t, []string{"a", "b"}, func(_ string, bound []string, _ string) string {
 		seen = append([]string(nil), bound...)
 		return pick
 	})
@@ -94,6 +94,44 @@ func TestAllocateReceivesBound(t *testing.T) {
 	}
 	if len(seen) != 1 || seen[0] != "a" {
 		t.Errorf("bound 应含已绑定的 a: %v", seen)
+	}
+}
+
+// scope（渠道分组）必须同时作用于"可用集校验"与"分配回调"：
+// 只过滤其中一个都会让绑定把请求引到组外账号。
+func TestScopedResolveFiltersAndAllocates(t *testing.T) {
+	var gotScope string
+	r := New(Config{
+		TTL:        time.Minute,
+		GCInterval: time.Minute,
+		Available:  func() []string { return []string{"in", "out"} },
+		AvailableForModelScoped: func(_, scope string) []string {
+			if scope == "g1" {
+				return []string{"in"} // 组内只有 in
+			}
+			return []string{"in", "out"}
+		},
+		Allocate: func(_ string, _ []string, scope string) string {
+			gotScope = scope
+			if scope == "g1" {
+				return "in"
+			}
+			return "out"
+		},
+	})
+	uid, ok := r.ResolveForModelScoped("k1", "", "g1")
+	if !ok || uid != "in" {
+		t.Fatalf("g1 应分配到 in: uid=%q ok=%v", uid, ok)
+	}
+	if gotScope != "g1" {
+		t.Errorf("回调应收到 scope=g1: %q", gotScope)
+	}
+	// 组外账号即便被绑定也必须被判为不可用（快路径校验同口径）：手工塞一条 out 绑定。
+	r.mu.Lock()
+	r.entries["k2"] = entry{uid: "out", lastActive: time.Now()}
+	r.mu.Unlock()
+	if uid2, ok := r.ResolveForModelScoped("k2", "", "g1"); ok && uid2 == "out" {
+		t.Fatal("g1 的会话不得复用绑定到组外账号 out 的记录")
 	}
 }
 

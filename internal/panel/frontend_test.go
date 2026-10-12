@@ -111,7 +111,7 @@ try {
 		t.Fatal(err)
 	}
 	hf.Close()
-	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages", "#apikeys"} {
+	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages", "#apikeys", "#channels"} {
 		cmd := exec.Command(node, hf.Name(), "app.js")
 		cmd.Dir = "." // 测试工作目录 = internal/panel
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
@@ -657,5 +657,166 @@ run('api = mockAPI');
 	}
 	if !bytes.Contains(out, []byte("PICK PANEL OK")) {
 		t.Fatalf("pick panel frontend test did not finish:\n%s", out)
+	}
+}
+
+// 上游渠道面板：定义表三行渲染是昵称 + 成员 + 白名单 + 停用标记；密钥绑定行按分组打标签；
+// 保存 body 必须是 channels 段完整状态（删渠道/解绑靠整体替换，不是靠省略键）。
+func TestAppJSChannelsPanel(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; channels panel skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const nodes = new Map();
+function element() {
+  return { value: '', textContent: '', innerHTML: '', hidden: false, disabled: false,
+    dataset: {}, children: [], isConnected: true,
+    classList: { add() {}, remove() {}, toggle() {} },
+    focus() {}, select() {}, addEventListener() {}, appendChild() {}, remove() {},
+    querySelectorAll: () => [], querySelector: () => null,
+    closest: () => null };
+}
+const get = id => { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); };
+// chInputs 可在用例中改值：渠道保存同样从 DOM 回读。
+// 注意桩的忠实度：saveChannels 先 el.closest('tr') 再行内 querySelector('[data-f=...]')，
+// 所以每个输入的 closest 必须返回同行的查找器，否则行会被整行跳过、defs 为空。
+const chMainRow = [
+  { dataset: { chg: 'main', f: 'name' }, value: 'main' },
+  { dataset: { chg: 'main', f: 'label' }, value: '主渠道' },
+  { dataset: { chg: 'main', f: 'realm' }, value: 'cn' },
+  { dataset: { chg: 'main', f: 'models' }, value: 'glm-5*, deepseek-v3' },
+  { dataset: { chg: 'main', f: 'enabled' }, checked: true },
+];
+for (const el of chMainRow) {
+  el.closest = () => ({ querySelector: (sel) => {
+    if (sel === '[data-f="name"]') return chMainRow[0];
+    if (sel === '[data-f="label"]') return chMainRow[1];
+    if (sel === '[data-f="realm"]') return chMainRow[2];
+    if (sel === '[data-f="models"]') return chMainRow[3];
+    if (sel === '[data-f="enabled"]') return chMainRow[4];
+    if (sel === '[data-grp-name]') return null;
+    return null;
+  } });
+}
+// 额外加一条“停用渠道”行：验证停用标记能随保存发出（unchecked checkbox 场景）。
+const chDeadRow = [
+  { dataset: { chg: 'dead', f: 'name' }, value: 'dead' },
+  { dataset: { chg: 'dead', f: 'label' }, value: '' },
+  { dataset: { chg: 'dead', f: 'realm' }, value: '' },
+  { dataset: { chg: 'dead', f: 'models' }, value: '' },
+  { dataset: { chg: 'dead', f: 'enabled' }, checked: false },
+];
+for (const el of chDeadRow) {
+  el.closest = () => ({ querySelector: (sel) => {
+    if (sel === '[data-f="name"]') return chDeadRow[0];
+    if (sel === '[data-f="label"]') return chDeadRow[1];
+    if (sel === '[data-f="realm"]') return chDeadRow[2];
+    if (sel === '[data-f="models"]') return chDeadRow[3];
+    if (sel === '[data-f="enabled"]') return chDeadRow[4];
+    if (sel === '[data-grp-name]') return null;
+    return null;
+  } });
+}
+let chGroupInputs = chMainRow.concat(chDeadRow);
+let chKeySels = [
+  { dataset: { chk: 'key-1' }, value: 'main' },
+  { dataset: { chk: 'key-2' }, value: '' },
+];
+const sandbox = {
+  location: { hash: '#channels', origin: 'http://127.0.0.1:4321' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: {},
+  document: {
+    querySelectorAll: (sel) => {
+      if (sel === '#chGroupBody [data-chg]') return chGroupInputs;
+      if (sel === '#chKeyBody [data-chk]') return chKeySels;
+      return [];
+    },
+    querySelector: () => null, getElementById: get,
+    addEventListener() {}, documentElement: element(), head: element(), body: element(),
+    createElement: element, activeElement: element(), cookie: '' },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
+  confirm: () => true,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set,
+  RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
+  URL, Symbol, Proxy, Reflect,
+};
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, { filename: 'app.js' });
+const run = code => vm.runInContext(code, sandbox);
+const requests = [];
+sandbox.mockAPI = async (path, options) => {
+  requests.push({ path, method: options && options.method, body: options && options.body });
+  // loadChannels 一次并行三路：config / api_keys / overview。
+  if (String(path).indexOf('config') >= 0) return { ok: true, path: '/x/config.json', config: {
+    channels: {
+      enabled: true,
+      groups: { main: { label: '主渠道', realm: 'cn', models: ['glm-5*'], enabled: true },
+                dead: { label: '', realm: '', models: [], enabled: false } },
+      keys: { 'key-1': 'main' },
+    } } };
+  if (String(path).indexOf('api_keys') >= 0) return { ok: true, keys: [
+    { id: 'key-1', name: '对外A', prefix: 'sk-wb2a-aaaa1111', enabled: true, created_at: '' },
+    { id: 'key-2', name: '测试B', prefix: 'sk-wb2a-bbbb2222', enabled: false, created_at: '' } ] };
+  if (String(path).indexOf('overview') >= 0) return { accounts: [], pick: { accounts: [
+    { uid: 'u1', nickname: '昵1', group: 'main' },
+    { uid: 'u2', nickname: '昵2', group: 'main' } ] } };
+  return { ok: true, restart_required: [] };
+};
+run('api = mockAPI');
+(async () => {
+  await run('loadChannels()');
+  assert.strictEqual(get('chEnabled').checked, true);
+  assert(get('chNote').textContent.indexOf('2 个渠道定义') >= 0, '应显示渠道数');
+  assert(get('chNote').textContent.indexOf('1 条密钥绑定') >= 0, '应显示绑定数');
+  const ghtml = get('chGroupBody').innerHTML;
+  // 三行合一：名/label/白名单/members/停用都落在同一行字符串里才能查（“三分开”是上次权重列的坑）。
+  assert(ghtml.indexOf('主渠道') >= 0, '定义行应带展示名');
+  assert(ghtml.indexOf('glm-5*') >= 0, '定义行应带白名单原文');
+  assert(ghtml.indexOf('2 个') >= 0, '应显示成员数 2（来自 overview.pick.accounts.group）');
+  const khtml = get('chKeyBody').innerHTML;
+  assert(khtml.indexOf('对外A') >= 0, '绑定行应带密钥名称而不是裸 prefix');
+  assert(khtml.indexOf('sk-wb2a-aaaa1111') >= 0, '绑定行应带密钥前缀');
+  assert(khtml.indexOf('限 2 个账号') >= 0, '绑定的生效列应显示可用的成员数');
+  assert(khtml.indexOf('已禁用') >= 0, '禁用的 key 应有标记');
+  // 保存：channels 段必须是完整状态（enabled/groups/keys 全有）。
+  // 注意 saveChannels 成功后还会 await loadChannels（记三条 GET），定位必须按 method 找 POST。
+  await run('saveChannels()');
+  const posts = requests.filter(r => r.path === 'config' && r.method === 'POST');
+  assert.strictEqual(posts.length, 1, 'saveChannels 应恰提交一次 config POST');
+  const body = JSON.parse(posts[0].body);
+  assert.strictEqual(body.channels.enabled, true);
+  assert.deepStrictEqual(body.channels.groups.main.models, ['glm-5*', 'deepseek-v3']);
+  assert.strictEqual(body.channels.keys['key-1'], 'main');
+  // key-2 选了「不限制」→ keys 里必须没有它（留空键 = 解绑，且不能发空串）。
+  assert.strictEqual(body.channels.keys['key-2'], undefined);
+  // 白名单校验：realm 非法由服务端拦，这里只断言客户端组装了完整形态。
+  assert(body.channels.groups.dead.enabled === false, '停用标记必须随保存发出');
+  console.log('CHANNELS PANEL OK');
+})().catch(error => { console.error(error.stack); process.exitCode = 1; });
+`
+	f, err := os.CreateTemp(t.TempDir(), "channels-panel-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("channels panel frontend test failed: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("CHANNELS PANEL OK")) {
+		t.Fatalf("channels panel frontend test did not finish:\n%s", out)
 	}
 }

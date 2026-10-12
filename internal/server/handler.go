@@ -68,6 +68,15 @@ type Config struct {
 
 	// RequestLog 请求指标与脱敏 JSONL 归档（可选；nil = 不记录）。
 	RequestLog *reqlog.Recorder
+
+	// ChannelOfKey 解析调用密钥绑定的上游渠道（NewAPI 口径：key → 分组 → 渠道账号）。
+	// nil = 渠道功能关闭；回调返回 ok=false = 该 key 未绑定（不限制，现状行为）。
+	// cmd/server 侧从 config.channels 构建（key 支持密钥 ID 或前缀，最长匹配）。
+	ChannelOfKey ChannelResolver
+
+	// ChannelStatus 返回上游渠道定义的快照（定义 + 绑定明细，/status channels 段用）；
+	// nil 时透出空段（渠道功能关闭）。比 ChannelOfKey 多一个维度：绑定的"未命中"标注。
+	ChannelStatus func() any
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -258,12 +267,23 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		// 的 pick 段同源（pool.PickPolicyStatus 单一事实来源），运维在 /status 一处即可
 		// 读到「谁被选中、为什么」（weight=0 摘除 / priority 档位 / SWRR 累积）。
 		"pick": h.cfg.Pool.PickPolicyStatus(),
+		// channels 上游渠道段（定义 + 绑定明细，含"未命中"标注）：与面板「上游渠道」页
+		// 同源（cmd/server channelRouter.status），nil 时透出空段（功能关闭）。
+		"channels": h.channelStatusPayload(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
 		},
 	})
+}
+
+// channelStatusPayload 组装 /status 的 channels 段；ChannelStatus 未注入时返回空对象。
+func (h *Handler) channelStatusPayload() any {
+	if h.cfg.ChannelStatus != nil {
+		return h.cfg.ChannelStatus()
+	}
+	return map[string]any{"enabled": false, "groups": map[string]any{}, "bindings": []any{}}
 }
 
 // countsMapFrom 把 CountsDetailed 五元组打包成 /status 的域分组建模。
@@ -297,12 +317,21 @@ const (
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	// 调用密钥探测模型列表：只刷新「最近调用」，不计入调用次数（没有 token 消耗）。
-	if id := clientKeyID(r); id != "" && h.cfg.APIKeys != nil {
-		h.cfg.APIKeys.TouchUsage(id, "")
+	keyID := clientKeyID(r)
+	if keyID != "" && h.cfg.APIKeys != nil {
+		h.cfg.APIKeys.TouchUsage(keyID, "")
+	}
+	list := h.modelList()
+	// 渠道约束（realm + 白名单）：只列该 key 真正能调的模型，与 chatCompletions 的
+	// 拒绝规则同源——不然客户端从列表里选到一个必然 403 的名字。
+	if h.cfg.ChannelOfKey != nil && keyID != "" {
+		if ch, bound := h.cfg.ChannelOfKey(keyID); bound {
+			list = FilterChannelModels(list, ch)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   list,
 	})
 }
 
@@ -552,8 +581,37 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
-	// 裸名 → ("cn", 原串)，CN 现状零回归。
-	realm, bareModel := resolveModel(peek.Model)
+	// 裸名 → ("cn", 原串)，CN 现状零回归。realmExplicit 区分"显式前缀"与"裸名缺省 cn"，
+	// 渠道声明 realm 时前者冲突才拒绝、后者采用渠道域（见下方渠道段）。
+	realm, bareModel, realmExplicit := resolveModelExplicit(peek.Model)
+
+	// 上游渠道（NewAPI 口径）：key → 分组 → 渠道账号。未绑定 / 功能关闭 = 不限制（现状）。
+	// 三重校验都**直接拒绝**、不静默回落（回落 = 越权用别组账号/用未授权模型）。
+	channelScope := ""
+	if h.cfg.ChannelOfKey != nil && keyID != "" {
+		if ch, bound := h.cfg.ChannelOfKey(keyID); bound {
+			if !ch.Enabled {
+				writeOpenAIError(w, http.StatusForbidden, "channel_disabled",
+					"the upstream channel bound to this API key is disabled")
+				return
+			}
+			if ch.Realm != "" {
+				if realmExplicit && realm != ch.Realm {
+					writeOpenAIError(w, http.StatusForbidden, "channel_realm_mismatch",
+						"model "+peek.Model+" belongs to realm "+realm+
+							" but this API key is limited to "+ch.Realm)
+					return
+				}
+				realm = ch.Realm // 裸名采用渠道域（不被缺省 cn 顶掉）
+			}
+			if !ChannelAllowedModel(ch.Models, bareModel) {
+				writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+					"model "+bareModel+" is not allowed for this API key")
+				return
+			}
+			channelScope = ch.Group
+		}
+	}
 	modelRate := ""
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
@@ -573,11 +631,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
+	// 渠道分组隔离下会话键按分组命名空间隔离：同一个会话文本被不同分组的 key 使用时
+	// 不得共享绑定（否则 A 组 key 建好的绑定被 B 组 key 命中 → 跨组用号）。
+	if channelScope != "" {
+		sessKey = "ch\x1f" + channelScope + "\x1f" + sessKey
+	}
 	stickyUID := ""
 	if h.cfg.Session != nil && sessKey != "" {
-		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
-		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
+		// 按模型 + 渠道分组解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
+		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）；分组 scope 同口径过滤。
+		if uid, ok := h.cfg.Session.ResolveForModelScoped(sessKey, peek.Model, channelScope); ok {
 			stickyUID = uid
 		}
 	}
@@ -750,6 +813,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		var acct *auth.Auth
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
+			// 渠道隔离兜底：绑定建立后账号可能被移出分组/改组，而绑定仍指向旧号。
+			// 不在此拦下，严格分组隔离就被会话粘性绕过（实测路径：账号改分组后，
+			// 老会话继续用组外号）。判为不可用 → 解绑，回落组内普通轮换。
+			if acct != nil && !h.cfg.Pool.UIDInGroup(stickyUID, channelScope) {
+				unbindSticky()
+				acct = nil
+			}
 			if acct == nil || (realm != "" && acct.Realm() != realm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
 				// 本次回落普通轮换。
@@ -758,9 +828,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if acct == nil {
-			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
-			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			// 模型感知 + realm 感知 + 渠道分组感知选号：模型非空时启用 6004 模型级冷却
+			// 豁免（healthyForModel），realm 谓词过滤跨域账号，分组谓词实现渠道隔离
+			// （channelScope 为空 = 不限组，主密钥与未绑定 key 走这条，现状零回归）。
+			acct = h.cfg.Pool.PickExcludingForRealmGroup(tried, bareModel, realm, channelScope)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable

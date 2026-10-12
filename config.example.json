@@ -88,5 +88,15 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "channels": {
+    "enabled": true,
+    "groups": {
+      "main": {"label": "主渠道", "realm": "cn", "models": [], "enabled": true},
+      "vip": {"label": "VIP（限制模型）", "realm": "cn", "models": ["glm-5*", "deepseek-v3"], "enabled": true}
+    },
+    "keys": {
+      "sk-wb2a-xxxxxxxx": "vip"
+    }
   }
 }

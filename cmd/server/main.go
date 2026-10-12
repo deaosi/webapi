@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,7 +33,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.12.0-panel"
+const appVersion = "1.13.0-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -76,6 +77,14 @@ func main() {
 	apiKeys, err := apikeys.New(stateSibling(cfg.StateFile, "api_keys.json"))
 	if err != nil {
 		log.Fatalf("load API keys: %v", err)
+	}
+
+	// 上游渠道路由器：把 config.channels 编译成 key → 渠道 的解析器。全程单实例，
+	// saveConfig 热生效时调 Set 替换绑定表（handler 里持有的是同一个 Resolve 值）。
+	chRouter := newChannelRouter(&cfg.Channels, apiKeys)
+	if n := len(cfg.Channels.Keys); n > 0 {
+		log.Printf("channels: %d 条密钥渠道绑定，%d 个渠道定义（enabled=%v）",
+			n, len(cfg.Channels.Groups), cfg.Channels.Enabled)
 	}
 
 	auths, err := auth.LoadDir(cfg.AuthDir)
@@ -134,6 +143,9 @@ func main() {
 			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
 			// 裸名走 cn（现状零回归）。闭包内部 resolveModel 剥前缀，再按 realm 过滤。
 			AvailableForModel: realmAwareAvailableForModel(p),
+			// scope 感知闭包：同上再叠加渠道分组（上游渠道隔离下，粘性可用集与首次
+			// 分配都只看同组账号；scope 为空即退化到上面一条）。
+			AvailableForModelScoped: realmAwareAvailableForModelScoped(p),
 			// 首次分配走池子策略（权重/priority/swrr/成本层/到期优先）：不接这个回调
 			// 会话路由器会自行哈希分配，整条选号策略被旁路（详见 wiring.go 注释）。
 			Allocate: realmAwareAllocate(p),
@@ -288,7 +300,7 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, chRouter)
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
@@ -314,6 +326,11 @@ func main() {
 		PromptText:   cfg.PromptText,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
+		// 上游渠道（NewAPI 口径）：key → 分组 → 渠道账号。chRouter 全程复用同一实例，
+		// saveConfig 热生效时调 Set 换绑定表（不重启、不影响在途请求）。
+		ChannelOfKey: chRouter.Resolve,
+		// channelStatus 返回具体 struct，包一层 any 供 /status channels 段透出。
+		ChannelStatus: func() any { return chRouter.status() },
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -373,7 +390,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, chRouter *channelRouter) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -386,7 +403,11 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
+	// 整体替换子树先摘出来：这些路径由面板以"完整状态"提交，深合并无法表达删除
+	// （省略键=保留旧值），会让删分组/解绑密钥静默失效。
+	replaced := takeReplacePaths(incoming)
 	merged := mergeConfigMaps(cur, incoming)
+	applyReplacePaths(merged, replaced)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
 	newCfg, err := ParseConfig(mergedJSON(merged))
@@ -452,6 +473,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if mode, inner, err := pool.NormalizePickMode(newCfg.Pool.PickMode, newCfg.Pool.PickInner); err == nil {
 		_ = p.SetPickPolicy(mode, inner, newCfg.Pool.Accounts, newCfg.Pool.Groups)
 	}
+	// 上游渠道绑定热生效（normalizeChannels 已校验分组存在性，这里只换绑定表）。
+	chRouter.Set(&newCfg.Channels)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
@@ -502,6 +525,74 @@ func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
 		cur[k] = v
 	}
 	return cur
+}
+
+// replacePaths 提交语义为「整体替换」的配置子树（点分路径）。
+//
+// 为什么需要例外：深合并对嵌套对象是逐键覆盖，**省略某个键等于保留旧值**，于是
+// "删除"这一操作无法表达——面板提交删除后的全量 map，旧键又会被合并回来，删除
+// 静默失效（渠道解绑、删渠道分组、删账号权重路由都会踩）。这些子树在面板上被当作
+// 「完整状态」提交（增删改一次提交全量），所以整体替换才是它们的正确语义。
+//
+// 未列入此表的标量/叶子配置仍走深合并，保留用户手写的未知键。
+var replacePaths = [][]string{
+	{"channels"},         // 上游渠道：定义 + 绑定（本页整页提交）
+	{"pool", "accounts"}, // 账号静态路由（权重/优先级/分组）
+	{"pool", "groups"},   // 分组表
+}
+
+// takeReplacePaths 从 incoming 中取出并移除全部 replacePaths 子树，返回路径 → 值。
+func takeReplacePaths(incoming map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, path := range replacePaths {
+		if v, ok := pathTake(incoming, path); ok {
+			out[strings.Join(path, ".")] = v
+		}
+	}
+	return out
+}
+
+// applyReplacePaths 把取出的子树整值写回 merged（覆盖合并结果）。
+func applyReplacePaths(merged map[string]any, replaced map[string]any) {
+	for joined, v := range replaced {
+		pathSet(merged, strings.Split(joined, "."), v)
+	}
+}
+
+// pathTake 取出并按需删除嵌套路径上的值（中间层不存在或不是对象时返回 false）。
+func pathTake(m map[string]any, path []string) (any, bool) {
+	if len(path) == 0 {
+		return nil, false
+	}
+	if len(path) == 1 {
+		v, ok := m[path[0]]
+		if ok {
+			delete(m, path[0])
+		}
+		return v, ok
+	}
+	child, ok := m[path[0]].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	return pathTake(child, path[1:])
+}
+
+// pathSet 把 v 写到嵌套路径（中间层缺失或不是对象时就地新建对象）。
+func pathSet(m map[string]any, path []string, v any) {
+	if len(path) == 0 {
+		return
+	}
+	if len(path) == 1 {
+		m[path[0]] = v
+		return
+	}
+	child, ok := m[path[0]].(map[string]any)
+	if !ok {
+		child = map[string]any{}
+		m[path[0]] = child
+	}
+	pathSet(child, path[1:], v)
 }
 
 // mergedJSON 把合并后的 map 序列化回 JSON（供 ParseConfig 校验）。

@@ -11,6 +11,10 @@ const apiKeyState = {
   mode: 'create', editID: '', secret: '', saving: false, modalOpen: false, opener: null
 };
 
+// chState 渠道页状态：声明显式提前到顶层 go() 之前（const TDZ——开局 hash 如果是
+// #channels，顶层 go() 在文件求值中途就会调 loadChannels，滞后声明直接炸）。
+const chState = { defs: {}, keys: {}, enabled: true, keyList: [], members: {}, dirty: false, loaded: false };
+
 const $ = id => document.getElementById(id);
 
 /* ── 主题 ─────────────────────────────────────────────────────────── */
@@ -177,7 +181,7 @@ $('btnKey').onclick = async () => {
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', apikeys: 'API 密钥', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', apikeys: 'API 密钥', channels: '上游渠道', config: '配置', logs: '运行日志' };
 function go(v) {
   if (v !== 'apikeys' && apiKeyState.modalOpen) closeAPIKeyModal(false);
   view = v;
@@ -186,6 +190,7 @@ function go(v) {
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'apikeys') loadAPIKeys();
+  if (v === 'channels') loadChannels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
@@ -2469,3 +2474,198 @@ async function loadPackages() {
 }
 
 if ($('btnPk')) $('btnPk').onclick = loadPackages;
+
+/* ── 上游渠道（NewAPI 口径：key → 分组 → 渠道账号） ────────────────── */
+// 数据来源三处拼装（无独立后端端点，避免重复状态）：
+//   - 渠道定义与绑定：GET /panel/api/config 的 channels 段（配置的唯一事实来源）；
+//   - 调用密钥列表：GET /panel/api/api_keys（拿 id + prefix + name）；
+//   - 分组成员数：账号池 overview.pick.accounts[].group（与「账号池·分组」列同源）。
+// 保存走配置页同通道（POST /panel/api/config），channels 段是「整体替换」语义
+// （见 cmd/server replacePaths）：删渠道/解绑靠提交全量状态表达，不是靠省略键。
+//
+// 注意 TDZ：chState 的声明见文件顶部（apiKeyState 旁）。const 在文件求值中途若被
+// loadChannels（顶层 go('#channels') 触发）先访问会直接 ReferenceError，
+// 所以 state 必须声明在 go() 之前，这里只留函数。
+
+function chGroupNames() { return Object.keys(chState.defs).sort(); }
+
+// channelMemberNames 返回分组的成员账号显示名（昵称优先，回退短 uid）。
+function channelMemberNames(group) {
+  return (chState.members[group] || []);
+}
+
+function chModelListText(models) { return (models || []).join(', '); }
+
+function renderChannels() {
+  const names = chGroupNames();
+  $('chEnabled').checked = !!chState.enabled;
+  $('chNote').textContent = chState.loaded
+    ? ('共 ' + names.length + ' 个渠道定义 · ' + Object.keys(chState.keys).length + ' 条密钥绑定')
+    : '正在加载…';
+
+  // 渠道定义表
+  $('chGroupBody').innerHTML = names.length ? names.map(n => {
+    const d = chState.defs[n] || {};
+    const members = channelMemberNames(n);
+    const enabled = d.enabled !== false;
+    const mTag = members.length
+      ? '<span class="tag ok">' + members.length + ' 个</span>'
+      : '<span class="tag warn">无成员</span>';
+    const eTag = enabled ? '' : ' <span class="tag bad">停用</span>';
+    return '<tr title="成员：' + esc(members.join('、') || '（无）') + '">' +
+      '<td><input data-chg="' + esc(n) + '" data-f="name" value="' + esc(n) + '" aria-label="分组名"></td>' +
+      '<td><input data-chg="' + esc(n) + '" data-f="label" value="' + esc(d.label || '') + '" placeholder="（同分组名）" aria-label="展示名"></td>' +
+      '<td><select data-chg="' + esc(n) + '" data-f="realm">' +
+        ['', 'cn', 'global'].map(r => '<option value="' + r + '"' + ((d.realm || '') === r ? ' selected' : '') + '>' +
+          (r === '' ? '（不限）' : r) + '</option>').join('') + '</select></td>' +
+      '<td><input data-chg="' + esc(n) + '" data-f="models" value="' + esc(chModelListText(d.models)) +
+        '" placeholder="留空=不限，逗号分隔，可 glm-5*" aria-label="模型白名单"></td>' +
+      '<td>' + mTag + '</td>' +
+      '<td><label class="sel-note"><input type="checkbox" data-chg="' + esc(n) + '" data-f="enabled"' +
+        (enabled ? ' checked' : '') + '> 启用</label>' + eTag + '</td>' +
+      '<td><button class="xs ghost danger" data-act="ch-del" data-g="' + esc(n) + '">删除</button></td></tr>';
+  }).join('') : '<tr><td colspan="7"><div class="empty">还没有渠道。点「新增渠道」创建一个分组渠道，' +
+      '再到账号池把账号归入该分组。</div></td></tr>';
+
+  // 密钥绑定表
+  const keys = chState.keyList;
+  $('chKeyBody').innerHTML = keys.length ? keys.map(k => {
+    const bound = chState.keys[k.id] || '';
+    const opts = ['<option value="">（不限制）</option>'].concat(names.map(n =>
+      '<option value="' + esc(n) + '"' + (bound === n ? ' selected' : '') + '>' + esc(n) + '</option>')).join('');
+    let eff;
+    if (!bound) {
+      eff = chState.enabled ? '<span class="note">全池可用（未绑定）</span>' : '<span class="note">渠道隔离已关闭</span>';
+    } else if (!chState.defs[bound]) {
+      eff = '<span class="tag bad">分组未定义</span>';
+    } else if (chState.defs[bound].enabled === false) {
+      eff = '<span class="tag bad">渠道已停用 → 请求 403</span>';
+    } else {
+      const cnt = channelMemberNames(bound).length;
+      eff = cnt ? '<span class="tag ok">限 ' + cnt + ' 个账号</span>'
+                : '<span class="tag warn">该分组无成员账号 → 请求失败</span>';
+    }
+    const disabled = k.enabled === false;
+    return '<tr title="密钥 ID: ' + esc(k.id) + '">' +
+      '<td class="who"><div class="nm">' + esc(k.name || '（未命名）') +
+        (disabled ? ' <span class="tag bad">已禁用</span>' : '') + '</div></td>' +
+      '<td class="who"><div class="id">' + esc(k.prefix || '') + '…</div></td>' +
+      '<td><select data-chk="' + esc(k.id) + '">' + opts + '</select></td>' +
+      '<td>' + eff + '</td></tr>';
+  }).join('') : '<tr><td colspan="4"><div class="empty">还没有调用密钥。先到「API 密钥」页创建。</div></td></tr>';
+}
+
+async function loadChannels() {
+  chState.loaded = false;
+  $('chError').hidden = true;
+  try {
+    const [cfg, akeys] = await Promise.all([
+      api('config'),
+      api('api_keys').catch(() => ({ keys: [] })),
+    ]);
+    const ch = (cfg && cfg.config && cfg.config.channels) || {};
+    chState.enabled = ch.enabled !== false;
+    chState.defs = ch.groups || {};
+    // 绑定只保留值非空的项（null / "" 都视为已解绑）。
+    const rawKeys = ch.keys || {};
+    chState.keys = {};
+    for (const ref of Object.keys(rawKeys)) {
+      if (String(rawKeys[ref] || '').trim()) chState.keys[ref] = String(rawKeys[ref]).trim();
+    }
+    chState.keyList = (akeys && akeys.keys) || [];
+    // 分组成员数来自账号池（overview.pick.accounts 的 group 列），与账号池页同一口径。
+    const ov = await api('overview').catch(() => null);
+    const accs = (ov && ov.pick && ov.pick.accounts) || [];
+    chState.members = {};
+    for (const a of accs) {
+      const g = String(a.group || '');
+      if (!g) continue;
+      (chState.members[g] = chState.members[g] || []).push(a.nickname || String(a.uid || '').slice(0, 8));
+    }
+    chState.loaded = true;
+    chState.dirty = false;
+    renderChannels();
+  } catch (e) {
+    $('chNote').textContent = '';
+    $('chError').textContent = '读取失败：' + e.message;
+    $('chError').hidden = false;
+  }
+}
+
+function chErr(msg) {
+  const el = $('chError');
+  el.textContent = msg; el.hidden = !msg;
+}
+
+$('btnChReload').onclick = loadChannels;
+$('btnChGroupAdd').onclick = () => {
+  if (!chState.loaded) return;
+  let i = Object.keys(chState.defs).length + 1, name = 'channel' + i;
+  while (chState.defs[name]) { i++; name = 'channel' + i; }
+  chState.defs[name] = { label: '', realm: '', models: [], enabled: true };
+  chState.dirty = true;
+  renderChannels();
+};
+document.addEventListener('click', ev => {
+  const b = ev.target.closest && ev.target.closest('button[data-act="ch-del"]');
+  if (!b) return;
+  const name = b.dataset.g;
+  delete chState.defs[name];
+  // 该分组的绑定同步解绑：否则配置会被"绑定到未定义分组"的校验拒绝（fail closed）。
+  for (const id of Object.keys(chState.keys)) {
+    if (chState.keys[id] === name) delete chState.keys[id];
+  }
+  chState.dirty = true;
+  renderChannels();
+});
+document.addEventListener('change', ev => {
+  if (ev.target.closest && ev.target.closest('#view-channels')) chState.dirty = true;
+});
+
+async function saveChannels() {
+  if (!chState.loaded) return;
+  chErr('');
+  const btn = $('btnChSave');
+  btn.disabled = true; btn.textContent = '保存中…';
+  try {
+    // 从 DOM 回读渠道定义（整页提交 = channels 段整体替换，删除才是有效的）。
+    const defs = {};
+    document.querySelectorAll('#chGroupBody [data-chg]').forEach(el => {
+      const row = el.closest('tr');
+      if (!row) return;
+      const nameEl = row.querySelector('[data-f="name"]');
+      const name = String((nameEl && nameEl.value) || '').trim();
+      if (!name) throw new Error('分组名不能为空');
+      const labelEl = row.querySelector('[data-f="label"]');
+      const realmEl = row.querySelector('[data-f="realm"]');
+      const modelsEl = row.querySelector('[data-f="models"]');
+      const enabledEl = row.querySelector('[data-f="enabled"]');
+      defs[name] = {
+        label: String((labelEl && labelEl.value) || '').trim(),
+        realm: String((realmEl && realmEl.value) || ''),
+        models: String((modelsEl && modelsEl.value) || '')
+          .split(',').map(s => s.trim()).filter(Boolean),
+        enabled: !!(enabledEl && enabledEl.checked),
+      };
+    });
+    // 绑定：以密钥 ID 为键（面板写入稳定标识；前缀写法仍可手改配置）。
+    const keys = {};
+    document.querySelectorAll('#chKeyBody [data-chk]').forEach(sel => {
+      const g = String(sel.value || '');
+      if (g) keys[sel.dataset.chk] = g;
+    });
+    for (const ref of Object.keys(keys)) {
+      if (!defs[keys[ref]]) {
+        throw new Error('绑定指向未定义的渠道分组 ' + keys[ref] + '（先创建该渠道）');
+      }
+    }
+    const body = { channels: { enabled: !!$('chEnabled').checked, groups: defs, keys } };
+    const r = await api('config', { method: 'POST', body: JSON.stringify(body) });
+    const n = (r.restart_required || []).length;
+    toast(n ? '渠道设置已保存，其中 ' + n + ' 项需重启' : '渠道设置已保存并立即生效', 'ok');
+    chState.dirty = false;
+    await loadChannels();
+  } catch (e) { chErr(e.message); toast('保存失败：' + e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = '保存渠道设置'; }
+}
+$('btnChSave').onclick = saveChannels;

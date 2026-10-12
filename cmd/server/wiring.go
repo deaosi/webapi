@@ -20,6 +20,16 @@ func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
 	}
 }
 
+// realmAwareAvailableForModelScoped 同上，再叠加渠道分组 scope（上游渠道隔离）。
+// session 包的新字段 AvailableForModelScoped 用它装配：粘性可用集与首次分配的
+// 选号候选同口径过滤，否则分配校验会把请求引到组外账号。
+func realmAwareAvailableForModelScoped(p *pool.Pool) func(model, scope string) []string {
+	return func(model, scope string) []string {
+		realm, bare := server.ResolveModel(model)
+		return p.AvailableUIDsForModelRealmGroup(bare, realm, scope)
+	}
+}
+
 // realmAwareAllocate 会话粘性首次分配的**策略选号**闭包：把"选哪个号"交回
 // pool.pickLocked，而不是让会话路由器自行哈希。
 //
@@ -32,17 +42,18 @@ func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
 // 双段语义原样保留：bound（已被其他会话绑定的 uid）作为第一段的排除集，先在空闲号里
 // 按策略选；全池皆绑定则放开 bound 再选一次（第二段）。realm 前缀在此剥掉，与
 // realmAwareAvailableForModel 同口径，避免跨 realm 泄漏。
-func realmAwareAllocate(p *pool.Pool) func(model string, bound []string) string {
-	return func(model string, bound []string) string {
+// scope（渠道分组）一路透传到组隔离选号：绑组 key 的粘性分配只在同组账号里选。
+func realmAwareAllocate(p *pool.Pool) func(model string, bound []string, scope string) string {
+	return func(model string, bound []string, scope string) string {
 		realm, bare := server.ResolveModel(model)
 		excl := make(map[string]bool, len(bound))
 		for _, u := range bound {
 			excl[u] = true
 		}
-		if a := p.PickExcludingForRealm(excl, bare, realm); a != nil {
+		if a := p.PickExcludingForRealmGroup(excl, bare, realm, scope); a != nil {
 			return a.UID // 第一段：空闲号内按策略选
 		}
-		if a := p.PickExcludingForRealm(nil, bare, realm); a != nil {
+		if a := p.PickExcludingForRealmGroup(nil, bare, realm, scope); a != nil {
 			return a.UID // 第二段：全池皆绑定 → 放开后重选
 		}
 		return ""
