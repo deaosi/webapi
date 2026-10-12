@@ -32,7 +32,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.11.10-panel"
+const appVersion = "1.12.0-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -108,6 +108,15 @@ func main() {
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
+	// 轮询策略（swrr/priority/account 路由，缺省 weighted+空表=现状行为）。
+	// normalize 已校验，此处错误只打日志不中断启动（防校验与注入口径漂移）。
+	if mode, inner, err := pool.NormalizePickMode(cfg.Pool.PickMode, cfg.Pool.PickInner); err != nil {
+		log.Printf("pick 策略非法（已回落 weighted）：%v", err)
+	} else if err := p.SetPickPolicy(mode, inner, cfg.Pool.Accounts, cfg.Pool.Groups); err != nil {
+		log.Printf("pick 路由非法（已回落空表）：%v", err)
+	} else if mode != pool.PickWeighted || len(cfg.Pool.Accounts) > 0 || len(cfg.Pool.Groups) > 0 {
+		log.Printf("pick 策略：mode=%s inner=%s accounts=%d groups=%d", mode, inner, len(cfg.Pool.Accounts), len(cfg.Pool.Groups))
+	}
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -434,6 +443,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
+	// 轮询策略热生效（normalize 已校验，非法值到不了这里）。
+	if mode, inner, err := pool.NormalizePickMode(newCfg.Pool.PickMode, newCfg.Pool.PickInner); err == nil {
+		_ = p.SetPickPolicy(mode, inner, newCfg.Pool.Accounts, newCfg.Pool.Groups)
+	}
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,

@@ -72,7 +72,17 @@
     "idle_weight_max": 5.0,
     "prefer_expiring": true,
     "expiring_soon": "168h",
-    "cost_explore_interval": "30m"
+    "cost_explore_interval": "30m",
+    "pick_mode": "weighted",
+    "pick_inner": "weighted",
+    "accounts": {
+      "uid-prefix-a1": {"weight": 3, "priority": 0, "group": "main"},
+      "uid-prefix-b2": {"weight": 1, "priority": 0, "group": "main"}
+    },
+    "groups": {
+      "main": {"priority": 0, "weight": 1},
+      "backup": {"priority": 10, "weight": 1}
+    }
   },
   "session_sticky": {
     "enabled": true,

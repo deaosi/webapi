@@ -63,6 +63,20 @@ type Pool struct {
 	// 为 LRU 兜底/防惊群提供与 time.Now() 精度无关的严格全序（Windows ~0.5ms 精度下
 	// lastUsed 墙钟会全等）。仅 pick 写锁路径读写，无需 atomic。
 	pickSeq uint64
+	// pick 选号策略（swrr/priority/weighted 模式 + 静态路由表，SetPickPolicy 注入）。
+	// 缺省 weighted + 空表 = 现状行为（w_final = w_base × 1）。
+	pick pickPolicy
+	// swCurr SWRR current 累积（账号级，key=uid；缺省 0）。纯运行态：路由表变更/
+	// ResetPickStats 清零，重启归零（自收敛，不持久化）。
+	swCurr map[string]float64
+	// grpCurr 组级 SWRR current（priority 同档多组分流用，key=组名）。同上运行态。
+	grpCurr map[string]float64
+	// pickDist 进程内 pick 分布计数（uid → 选中次数，供 /status pick 段验证比例）。
+	// 运行态：重启归零，ResetPickStats 清零。
+	pickDist map[string]uint64
+	// lastW 账号末次 pick 的 w_final（w_base × weight_cfg，供 /status 展示）。
+	// 无 pick 为 0（零值即“无数据”，不与真实权重混淆）。
+	lastW map[string]float64
 	// stopCh 关闭信号：Close 关闭它使 startFlusher 的后台 goroutine 退出。
 	// nil = 未启动 flusher（stateFp 为空时 New 不起 flusher）。
 	stopCh chan struct{}
@@ -88,6 +102,12 @@ func New(stateFp string) *Pool {
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
 		exploreLast:         map[string]time.Time{},
+		// 选号策略缺省：weighted + 空路由表 + weighted 内层 = 现状行为。
+		pick:     pickPolicy{mode: PickWeighted, inner: PickInnerWeighted},
+		swCurr:   map[string]float64{},
+		grpCurr:  map[string]float64{},
+		pickDist: map[string]uint64{},
+		lastW:    map[string]float64{},
 	}
 	if stateFp != "" {
 		p.load()

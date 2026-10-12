@@ -524,6 +524,21 @@ async function loadOverview(quiet) {
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
+    // pick 面板编辑态保护：用户正在改权重时后台刷新不覆盖输入；保存/切页后 dirty 清零。
+    if (!pickState.dirty) {
+      pickState.pick = d.pick || null;
+      renderPick();
+    } else {
+      // 脏态下仍更新分布计数（只读部分），不碰输入框。
+      if (d.pick && pickState.pick) {
+        pickState.pick.distribution = d.pick.distribution;
+        pickState.pick.accounts = (pickState.pick.accounts || []).map(a => {
+          const fresh = (d.pick.accounts || []).find(x => x.uid === a.uid);
+          if (fresh) { a.w_final = fresh.w_final; a.picks = fresh.picks; }
+          return a;
+        });
+      }
+    }
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
@@ -573,6 +588,169 @@ $('btnActivityAll').onclick = async () => {
   try { await api('activity_all', { method: 'POST' }); toast('活跃上报已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 };
+
+/* ── 轮询策略（账号池权重可视化） ───────────────────────────────────── */
+// 数据源：overview.pick（随账号池刷新）；写路径复用 /panel/api/config 深合并保存
+// （热生效）。accounts key 支持全 UID 或前缀，面板按“账号 UID 全串”回写（最长
+// 匹配天然覆盖旧前缀键，被覆盖的前缀键随深合并保留——保存后提示用户检查）。
+const pickState = { pick: null, dirty: false };
+function pickData() {
+  return (pickState.pick) || (overviewData && overviewData.pick) || null;
+}
+function pickAcctRows() {
+  const d = pickData();
+  if (!d) return [];
+  return (d.accounts || []).slice().sort((a, b) => String(a.uid) < String(b.uid) ? -1 : 1);
+}
+function pickGroups() {
+  const d = pickData();
+  return (d && d.groups) || [];
+}
+function renderPick() {
+  const d = pickData();
+  const modeEl = $('pickMode'), innerEl = $('pickInner');
+  if (!d) {
+    $('pickModeNote').textContent = '（老服务端无 pick 数据）';
+    $('grpBody').innerHTML = '<tr><td colspan="6"><div class="empty">无策略数据</div></td></tr>';
+    $('pickAcctBody').innerHTML = '<tr><td colspan="7"><div class="empty">无策略数据</div></td></tr>';
+    return;
+  }
+  if (!pickState.dirty) {
+    modeEl.value = d.mode || 'weighted';
+    innerEl.value = d.inner || 'weighted';
+  }
+  const modeName = { weighted: '加权随机', swrr: '平滑轮询', priority: '主备分档' }[d.mode] || d.mode;
+  $('pickModeNote').textContent = '当前 ' + modeName + (d.mode === 'priority' ? '（同档内 ' + d.inner + '）' : '');
+  // 分布条
+  const dist = d.distribution || {};
+  const total = Object.values(dist).reduce((a, b) => a + Number(b || 0), 0);
+  $('pickDist').textContent = total
+    ? Object.keys(dist).sort().map(u => u.slice(0, 8) + ' ' + dist[u] + '次(' + Math.round(dist[u] / total * 100) + '%)').join(' · ')
+    : '暂无 pick 记录（发请求后刷新可见）';
+  // 分组表
+  const groups = pickGroups();
+  $('grpBody').innerHTML = groups.length ? groups.map(g => {
+    const share = ''; // 组份额：成员 picks 汇总在分布条，组行只给成员数
+    return '<tr><td><input data-grp-name="' + esc(g.name) + '" value="' + esc(g.name) + '" aria-label="组名"></td>' +
+      '<td><input class="num-sm" type="number" step="1" data-grp="' + esc(g.name) + '" data-f="priority" value="' + g.priority + '" aria-label="优先级"></td>' +
+      '<td><input class="num-sm" type="number" step="0.1" min="0" data-grp="' + esc(g.name) + '" data-f="weight" value="' + g.weight + '" aria-label="权重"></td>' +
+      '<td class="num">' + g.members + '</td><td>' + share + '</td>' +
+      '<td><button class="xs ghost danger" data-act="grp-del" data-g="' + esc(g.name) + '">删除</button></td></tr>';
+  }).join('') : '<tr><td colspan="6"><div class="empty">无分组（账号直比）。点「新增分组」创建主备组。</div></td></tr>';
+  // 账号权重表
+  const rows = pickAcctRows();
+  const tot = rows.reduce((a, r) => a + Number(r.picks || 0), 0);
+  const groupNames = groups.map(g => g.name);
+  $('pickAcctBody').innerHTML = rows.length ? rows.map(r => {
+    const uid = String(r.uid || '');
+    const short = uid.length > 16 ? uid.slice(0, 16) + '…' : uid;
+    const pct = tot ? Math.round((r.picks || 0) / tot * 100) : 0;
+    const grpOpts = '<option value="">（无）</option>' + groupNames.map(n =>
+      '<option value="' + esc(n) + '"' + (r.group === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
+    const wTag = Number(r.weight) === 0 ? ' <span class="tag bad">摘除</span>' : '';
+    return '<tr title="uid: ' + esc(uid) + '">' +
+      '<td class="who"><div class="nm">' + esc(short) + '</div></td>' +
+      '<td><select class="grp-sel" data-uid="' + esc(uid) + '" data-f="group">' + grpOpts + '</select></td>' +
+      '<td><input class="num-sm" type="number" step="1" data-uid="' + esc(uid) + '" data-f="priority" value="' + r.priority + '" aria-label="优先级"></td>' +
+      '<td><input class="num-sm" type="number" step="0.1" min="0" data-uid="' + esc(uid) + '" data-f="weight" value="' + r.weight + '" aria-label="权重">' + wTag + '</td>' +
+      '<td class="num" title="w_base × weight_cfg">' + (Number(r.w_final || 0).toFixed(2)) + '</td>' +
+      '<td class="num">' + (r.picks || 0) + '次</td>' +
+      '<td><div class="pick-share" title="' + pct + '%"><i style="width:' + pct + '%"></i></div></td></tr>';
+  }).join('') : '<tr><td colspan="7"><div class="empty">池是空的</div></td></tr>';
+}
+function pickErr(msg) {
+  const el = $('pickError');
+  el.textContent = msg; el.hidden = !msg;
+}
+$('btnPickReset').onclick = async () => {
+  try { await api('pick/stats/reset', { method: 'POST' }); toast('分布计数已清零', 'ok'); loadOverview(true); }
+  catch (e) { toast(e.message, 'err'); }
+};
+$('btnGroupAdd').onclick = () => {
+  const d = pickData();
+  if (!d) return;
+  const base = 'group';
+  let i = (d.groups || []).length + 1, name = base + i;
+  const names = new Set((d.groups || []).map(g => g.name));
+  while (names.has(name)) { i++; name = base + i; }
+  d.groups = (d.groups || []).concat([{ name, priority: 10, weight: 1, members: 0 }]);
+  pickState.dirty = true;
+  renderPick();
+};
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-act="grp-del"]');
+  if (!b) return;
+  const d = pickData();
+  if (!d) return;
+  const g = b.dataset.g;
+  d.groups = (d.groups || []).filter(x => x.name !== g);
+  // 落空组成员回到无组（回写时 group:""）。
+  pickState.dirty = true;
+  renderPick();
+});
+async function savePick() {
+  const d = pickData();
+  if (!d) return;
+  pickErr('');
+  const btn = $('btnPickSave');
+  btn.disabled = true; btn.textContent = '保存中…';
+  try {
+    // 从 DOM 读回编辑值（账号行按 UID 全串回写；分组行按当前名回写）。
+    const accounts = {};
+    document.querySelectorAll('#pickAcctBody [data-uid]').forEach(el => {
+      const uid = el.dataset.uid, f = el.dataset.f;
+      accounts[uid] = accounts[uid] || { weight: 1, priority: 0, group: '' };
+      if (f === 'weight') {
+        const v = Number(el.value);
+        if (!Number.isFinite(v) || v < 0) throw new Error('权重必须 ≥0 的数字（' + uid.slice(0, 8) + '）');
+        accounts[uid].weight = v;
+      } else if (f === 'priority') {
+        const v = Math.trunc(Number(el.value));
+        if (!Number.isFinite(v)) throw new Error('优先级必须是整数（' + uid.slice(0, 8) + '）');
+        accounts[uid].priority = v;
+      } else if (f === 'group') {
+        accounts[uid].group = String(el.value || '');
+      }
+    });
+    const groups = {};
+    const seenGrp = new Set();
+    document.querySelectorAll('#grpBody [data-grp]').forEach(el => {
+      const g = el.dataset.grp, f = el.dataset.f;
+      if (seenGrp.has(g + '\x00' + f)) return;
+      // 组名可改：以同行 name 输入框为准。
+      const row = el.closest('tr');
+      const nameEl = row ? row.querySelector('[data-grp-name]') : null;
+      const name = String((nameEl && nameEl.value) || g).trim();
+      if (!name) throw new Error('组名不能为空');
+      groups[name] = groups[name] || { priority: 0, weight: 1 };
+      if (f === 'priority') {
+        const v = Math.trunc(Number(el.value));
+        if (!Number.isFinite(v)) throw new Error('分组优先级必须是整数（' + name + '）');
+        groups[name].priority = v;
+      } else if (f === 'weight') {
+        const v = Number(el.value);
+        if (!Number.isFinite(v) || v <= 0) throw new Error('分组权重必须 >0（' + name + '）');
+        groups[name].weight = v;
+      }
+      seenGrp.add(g + '\x00' + f);
+    });
+    // 账号引用的组若已被删：回退无组（不硬拦，避免删组卡死保存）。
+    for (const uid of Object.keys(accounts)) {
+      if (accounts[uid].group && !groups[accounts[uid].group]) accounts[uid].group = '';
+    }
+    const body = { pool: { pick_mode: $('pickMode').value, pick_inner: $('pickInner').value, accounts, groups } };
+    const r = await api('config', { method: 'POST', body: JSON.stringify(body) });
+    const n = (r.restart_required || []).length;
+    toast(n ? '策略已保存，其中 ' + n + ' 项需重启' : '策略已保存并立即生效', 'ok');
+    pickState.dirty = false;
+    loadOverview(true);
+  } catch (e) { pickErr(e.message); toast('保存失败：' + e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = '保存策略'; }
+}
+$('btnPickSave').onclick = savePick;
+document.addEventListener('change', ev => {
+  if (ev.target.closest && ev.target.closest('#pickBox')) pickState.dirty = true;
+});
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
 /* 实测上限标注：scripts/probe_max_tokens.py --panel-out 写入探测结果，

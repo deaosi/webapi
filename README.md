@@ -58,7 +58,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 能力 | 说明 |
 |---|---|
 | 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程，自动落盘凭证并重启容器加载新账号 |
-| 🔄 **多账号池** | 最早到期优先 + 成本分层 + 加权随机选号，Top-5 候选 + 防惊群 |
+| 🔄 **多账号池** | 最早到期优先 + 成本分层 + 加权随机选号，Top-5 候选 + 防惊群；可选 swrr 严格比例 / priority 主备分档 + 账号静态权重 + 分组（账号池页可视化配置） |
 | 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
@@ -393,6 +393,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `pool.idle_weight_max` | `5.0` | 闲置补偿权重封顶 |
 | `pool.prefer_expiring` | `true` | 最早到期优先：窗口内存在快过期积分时，按最近到期时间升序选择账号（同时间剩余积分多者优先） |
 | `pool.expiring_soon` | `168h` | 快过期路由窗口：仅此窗口内的批次参与最早到期优先；留空或 `0` 关闭 |
+| `pool.pick_mode` | `weighted` | 轮询模式：`weighted` = Top5 加权随机（现状）；`swrr` = 平滑加权轮询（严格按权重比例）；`priority` = 主备分档（只打最低优先级档，自动降级） |
+| `pool.pick_inner` | `weighted` | `priority` 模式同档内算法：`weighted` / `swrr` |
+| `pool.accounts` | 空 | 账号静态路由（key=全 UID 或 UID 前缀，最长匹配）：`weight`（缺省 1；`0`=软摘除，不出池只不被选中）/ `priority`（缺省 0，越小越优先）/ `group`（缺省空） |
+| `pool.groups` | 空 | 分组静态路由：`priority`（越小越先消耗）/ `weight`（同 priority 多组按 weight 用 SWRR 分流，必须 >0） |
 | `session_sticky.enabled` | `true` | 会话粘性路由开关 |
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
@@ -475,6 +479,22 @@ curl -s http://localhost:7863/v1/chat/completions \
    - `credits 比例` = 该号积分 / 候选集最大积分
    - `idleWeight` = `min(闲置小时 × idle_weight_per_hour, idle_weight_max)`，从未使用给满分
 5. 防惊群：跳过 100ms 内刚被选中的账号；全冷却时从非禁用、非余额耗尽的软冷却 / 熔断账号中选最早到期者顶班
+
+### 轮询模式与静态权重（NewAPI 口径）
+
+`pool.pick_mode` 切换权重选择算法（缺省 `weighted` = 上述 4–5 步，一字不动）：
+
+| 模式 | 语义 |
+|---|---|
+| `weighted`（缺省） | Top5 + 加权随机；静态 weight 作乘子（`w_final = w_base × weight_cfg`） |
+| `swrr` | 平滑加权轮询（nginx 口径）：全候选严格按权重比例分流，权重全 1 即严格 RR；不截断 Top5，自带打散 |
+| `priority` | 主备分档：只打最低优先级档（数字越小越优先），该档无 healthy 号自动降档；同档内按 `pick_inner`（`weighted`/`swrr`）选号 |
+
+`pool.accounts`（key=全 UID 或 UID 前缀，最长匹配）：`weight`（缺省 1；`0`=软摘除——不出池，签到/余额照常，只是不被选中，连兜底也不选）/ `priority`（缺省 0）/ `group`（缺省空）。
+`pool.groups`：`priority`（越小越先消耗，有分组时组优先级决定档位）/ `weight`（同 priority 多组按 weight 用 SWRR 分流，必须 >0）。
+非法值（负权重、组 weight≤0、空键、非法 mode）启动/保存时直接报错，不断流。
+
+账号池页「轮询策略」面板可视化配置：模式切换、分组增删改、每账号权重/优先级/分组、最终权重与实际分布计数（一键清零重测）。保存走配置页同通道（深合并 + 热生效，无需重启）。SWRR 累积与分布计数纯运行态，重启归零自收敛，`state.json` 格式零变更。
 
 ### 会话粘性
 

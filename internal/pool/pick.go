@@ -136,18 +136,26 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 权重只算一次：顶 5 截断要排序，若在 sort 比较器里现算 weightOf 会翻成 O(n log n) 次
 	// 冗余浮点计算（46 账号约 500 次）。先做 O(n) 预计算，再按 (权重, uid) 排序。
 	// costTier/modelCostOf 同样每候选只算一次（存入 tier/cost1k），比较器只读缓存字段。
-	type weighted struct {
-		e      *entry
-		w      float64
-		tier   int
-		cost1k float64
-	}
-	ws := make([]weighted, 0, len(cands))
+	// 静态权重乘子（w_final = w_base × weight_cfg）：weight_cfg=0 的账号在此剔除
+	// （软摘除，三种 pick_mode 通用；不出池，签到/余额/面板照常）。
+	ws := make([]weightedCand, 0, len(cands))
 	for _, e := range cands {
 		ti, ci := costTier(e)
 		if ti == bestTier {
-			ws = append(ws, weighted{e: e, w: p.weightOf(e, maxCredits, now), tier: ti, cost1k: ci})
+			cfg := routeWeight(p.pick.accounts, e.a.UID)
+			if cfg == 0 {
+				continue // 软摘除
+			}
+			wb := p.weightOf(e, maxCredits, now)
+			wf := wb * cfg
+			p.lastW[e.a.UID] = wf
+			ws = append(ws, weightedCand{e: e, w: wf, wBase: wb, tier: ti, cost1k: ci})
 		}
+	}
+	if len(ws) == 0 {
+		// 成本层内全被软摘除：不回退到摘除号（违背运营意图），直接返回 nil
+		// （无可用，与全禁用同口径；兜底路径同样跳过 weight=0，见 pickEarliestExpiryLocked）。
+		return nil
 	}
 	// 等权重洗牌：仅当存在权重相等且候选数超过 top5 时，才对 ws 做 Fisher-Yates
 	// 洗牌（且**不消耗 p.randInt64N 注入源**，避免改变 pickWeighted 的确定性语义，
@@ -179,20 +187,47 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 		return ws[i].e.a.UID < ws[j].e.a.UID // 稳定兜底（洗牌后此项几乎不触发）
 	})
+	// pick_mode 分发：priority 模式在此按 (组优先级, 账号优先级) 取最小档，
+	// 只保留该档成员继续走权重选择；swrr/weighted 全员进入权重选择。
+	// 档位是“可用性分组”：该档无 healthy 号（本函数执行到此 ws 非空，故档必有成员）
+	// 即命中该档——不存在“跳档”，因为占位的非 healthy 号早在 healthyOf 被过滤。
+	if p.pick.mode == PickPriority {
+		bestPri := -1
+		for _, c := range ws {
+			pri := p.effectivePriorityLocked(c.e.a.UID)
+			if bestPri < 0 || pri < bestPri {
+				bestPri = pri
+			}
+		}
+		kept := ws[:0]
+		for _, c := range ws {
+			if p.effectivePriorityLocked(c.e.a.UID) == bestPri {
+				kept = append(kept, c)
+			}
+		}
+		ws = kept
+	}
 	cands = cands[:0]
 	for _, c := range ws {
 		cands = append(cands, c.e)
 	}
+	// wsByUID 同层过滤后 w_final 索引：swrr/priority 选择用；weighted 沿用比较器口径。
+	wsByUID := make(map[string]float64, len(ws))
+	for _, c := range ws {
+		wsByUID[c.e.a.UID] = c.w
+	}
 	// candsAll 保留截断前的全候选（权重降序），供 LRU 兜底在全量范围选最旧者，
 	// 避免 top5 字典序截断把等权重靠后账号饿死（惊群根因之一）。
+	// swrr 模式：全候选 SWRR（不截断 Top5——截断会扭曲权重比例；打散由 SWRR 自带）。
 	candsAll := cands
-	if len(cands) > 5 {
+	if p.pick.mode == PickWeighted && len(cands) > 5 {
 		cands = cands[:5]
 	}
 	var e *entry
 	// 最早到期优先（WorkDaddy 口径）：只在成本层内、配置窗口内存在有效批次的账号中
 	// 排序；同到期时间按该批次剩余积分降序。防并发撞号仍优先过滤 minPickGap 内的账号，
 	// 优先级候选全部刚被用时才从中选最早者，避免把请求硬撞到同一账号。
+	// swrr 模式下同样生效（到期优先是成本/时效维度，与权重维度正交）。
 	if p.preferExpiring {
 		priority := make([]*entry, 0, len(candsAll))
 		for _, c := range candsAll {
@@ -222,30 +257,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 	}
 	if e == nil {
-		// 防并发撞号：在持锁内基于「上次选中时刻」过滤，但同一批并发 goroutine 会串行进入
-		// 本函数（写锁），每个进入者都把 lastUsed 置为 now —— 于是同一瞬间的第 2..N 个
-		// 进入者看到前一个账号 lastUsed==now（距今 0 < minPickGap），被自然挤向其他账号。
-		// 关键：lastUsed 在锁内赋值，使时间窗口判定在并发下可重入。
-		eligible := make([]*entry, 0, len(cands))
-		for _, c := range cands {
-			if now.Sub(c.lastUsed) >= minPickGap {
-				eligible = append(eligible, c)
-			}
-		}
-		if len(eligible) == 0 {
-			// top5 全部刚被用过：LRU 兜底，在**全候选 candsAll**（非仅 top5）里选最旧者。
-			// 用 usedSeq 单调序号而非 lastUsed 墙钟比较：Windows 等平台 time.Now() 精度
-			// ~0.5ms，快速连续选号时所有 lastUsed 完全相等，Before 全 false 会恒选
-			// candsAll[0] 导致集中。usedSeq 严格全序，与时间精度无关。
-			e = candsAll[0]
-			for _, c := range candsAll[1:] {
-				if c.usedSeq < e.usedSeq {
-					e = c
-				}
-			}
-		} else {
-			e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
-		}
+		e = p.selectByMode(ws, wsByUID, cands, candsAll, now)
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -257,6 +269,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	e.lastUsed = now // 锁内即时标记：下一个进入 pick 的 goroutine 立即看到本号已用
 	p.pickSeq++
 	e.usedSeq = p.pickSeq // 单调序号：保证 usedSeq 严格全序（防惊群/LRU 的权威依据）
+	p.recordPickLocked(e.a.UID) // 分布计数（/status pick 段验证比例用）
 	return e.a
 }
 
@@ -278,6 +291,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
+		}
+		if routeWeight(p.pick.accounts, uid) == 0 {
+			continue // 软摘除：兜底也不选中（运营意图优先于可用性）
 		}
 		if p.inFlightFull(e) {
 			continue
@@ -301,6 +317,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	// 防集中/防惊群失效（entry.usedSeq 契约：每次被选中时取 p.pickSeq 自增值）。
 	p.pickSeq++
 	best.usedSeq = p.pickSeq
+	p.recordPickLocked(best.a.UID)
 	return best.a
 }
 

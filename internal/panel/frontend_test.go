@@ -512,3 +512,122 @@ run('api = mockAPI');
 		t.Fatalf("API key frontend workflow did not finish:\n%s", out)
 	}
 }
+
+// 轮询策略面板：overview.pick 渲染（模式/分组/账号权重行/占比）与保存 body 形态。
+func TestAppJSPickPanel(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; pick panel skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const nodes = new Map();
+function element() {
+  return { value: '', textContent: '', innerHTML: '', hidden: false, disabled: false,
+    dataset: {}, children: [], isConnected: true,
+    classList: { add() {}, remove() {}, toggle() {} },
+    focus() {}, select() {}, addEventListener() {}, appendChild() {}, remove() {},
+    querySelectorAll: () => [], closest: () => null };
+}
+const get = id => { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); };
+// savePick 从 DOM 回读编辑值：桩按 selector 返回与 renderPick 输出同构的假输入。
+function fakeInput(dataset, value) {
+  return { dataset, value: String(value), closest: () => null };
+}
+const sandbox = {
+  location: { hash: '#accounts', origin: 'http://127.0.0.1:4321' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: {},
+  document: {
+    querySelectorAll: (sel) => {
+      if (sel === '#pickAcctBody [data-uid]') return [
+        fakeInput({ uid: 'u-main-0001', f: 'group' }, 'main'),
+        fakeInput({ uid: 'u-main-0001', f: 'priority' }, '0'),
+        fakeInput({ uid: 'u-main-0001', f: 'weight' }, '3'),
+        fakeInput({ uid: 'u-back-0002', f: 'group' }, 'backup'),
+        fakeInput({ uid: 'u-back-0002', f: 'priority' }, '10'),
+        fakeInput({ uid: 'u-back-0002', f: 'weight' }, '1'),
+      ];
+      if (sel === '#grpBody [data-grp]') return [
+        { dataset: { grp: 'main', f: 'priority' }, value: '0', closest: () => ({ querySelector: () => ({ value: 'main' }) }) },
+        { dataset: { grp: 'main', f: 'weight' }, value: '1', closest: () => ({ querySelector: () => ({ value: 'main' }) }) },
+        { dataset: { grp: 'backup', f: 'priority' }, value: '10', closest: () => ({ querySelector: () => ({ value: 'backup' }) }) },
+        { dataset: { grp: 'backup', f: 'weight' }, value: '1', closest: () => ({ querySelector: () => ({ value: 'backup' }) }) },
+      ];
+      return [];
+    },
+    querySelector: () => null, getElementById: get,
+    addEventListener() {}, documentElement: element(), head: element(), body: element(),
+    createElement: element, activeElement: element(), cookie: '' },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
+  confirm: () => true,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set,
+  RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
+  URL, Symbol, Proxy, Reflect,
+};
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, { filename: 'app.js' });
+const run = code => vm.runInContext(code, sandbox);
+const requests = [];
+sandbox.mockAPI = async (path, options) => {
+  requests.push({ path, method: options && options.method, body: options && options.body });
+  return { ok: true, restart_required: [] };
+};
+run('api = mockAPI');
+(async () => {
+  run(`overviewData = { accounts: [], pick: {
+    mode: 'priority', inner: 'swrr',
+    groups: [{ name: 'main', priority: 0, weight: 1, members: 1 },
+             { name: 'backup', priority: 10, weight: 1, members: 1 }],
+    accounts: [
+      { uid: 'u-main-0001', weight: 3, priority: 0, group: 'main', w_final: 12.5, sw_current: 0, picks: 30 },
+      { uid: 'u-back-0002', weight: 1, priority: 10, group: 'backup', w_final: 4.2, sw_current: 0, picks: 10 }
+    ],
+    distribution: { 'u-main-0001': 30, 'u-back-0002': 10 } } };`);
+  run('renderPick()');
+  assert.strictEqual(get('pickMode').value, 'priority');
+  assert.strictEqual(get('pickInner').value, 'swrr');
+  assert(get('grpBody').innerHTML.includes('main'));
+  assert(get('grpBody').innerHTML.includes('backup'));
+  const rows = get('pickAcctBody').innerHTML;
+  assert(rows.includes('u-main-0001'.slice(0, 16)));
+  assert(rows.includes('12.50'));
+  assert(rows.includes('75%'));
+  // 保存：body 必须带 pool.pick_mode/accounts/groups 三键。
+  // 注意 savePick 成功后会 fire-and-forget 触发 loadOverview（记一条 overview 请求），
+  // 故用 find 定位 config 请求而非 at(-1)。
+  await run('savePick()');
+  const last = requests.find(r => r.path === 'config');
+  assert(last, 'savePick 应提交 config 请求');
+  const body = JSON.parse(last.body);
+  assert.strictEqual(body.pool.pick_mode, 'priority');
+  assert.strictEqual(body.pool.pick_inner, 'swrr');
+  assert.strictEqual(body.pool.accounts['u-main-0001'].weight, 3);
+  assert.strictEqual(body.pool.accounts['u-back-0002'].group, 'backup');
+  assert.strictEqual(body.pool.groups['main'].priority, 0);
+  console.log('PICK PANEL OK');
+})().catch(error => { console.error(error.stack); process.exitCode = 1; });
+`
+	f, err := os.CreateTemp(t.TempDir(), "pick-panel-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("pick panel frontend test failed: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("PICK PANEL OK")) {
+		t.Fatalf("pick panel frontend test did not finish:\n%s", out)
+	}
+}

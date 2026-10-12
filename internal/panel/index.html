@@ -304,6 +304,13 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 fieldset { border: none; margin-bottom: 6px; }
 legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom: 10px; }
 .hr { height: 1px; background: var(--line-soft); margin: 4px 0 16px; }
+h4.sub-h { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; margin: 2px 0 10px; }
+h4.sub-h .hint { font-size: 11.5px; font-weight: 400; color: var(--ink-3); }
+h4.sub-h .grow { flex: 1; }
+.pick-share { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; min-width: 80px; }
+.pick-share > i { display: block; height: 100%; background: var(--accent); }
+input.num-sm { width: 76px; }
+select.grp-sel { max-width: 130px; }
 .switch { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; }
 .switch .lb { font-size: 13.5px; }
 .savebar {
@@ -555,6 +562,48 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </tr></thead>
           <tbody id="accBody"></tbody>
         </table>
+        </div>
+      </div>
+
+      <div class="box" id="pickBox">
+        <header>
+          <h3>轮询策略 <span class="hint" id="pickModeNote"></span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnPickReset" title="清零 SWRR 累积与分布计数，重新验证比例">清零计数</button>
+          <button class="xs primary" id="btnPickSave">保存策略</button>
+        </header>
+        <div class="pad">
+          <div class="grid3">
+            <label class="fld"><span class="lb">轮询模式</span>
+              <select id="pickMode">
+                <option value="weighted">weighted — Top5 加权随机（现状）</option>
+                <option value="swrr">swrr — 平滑加权轮询（严格比例）</option>
+                <option value="priority">priority — 主备分档（同档内按内层算法）</option>
+              </select></label>
+            <label class="fld"><span class="lb">同档内算法</span>
+              <select id="pickInner">
+                <option value="weighted">weighted — Top5 加权随机</option>
+                <option value="swrr">swrr — 平滑加权轮询</option>
+              </select>
+              <span class="hint">仅 priority 模式使用</span></label>
+            <div class="fld"><span class="lb">实际分布（进程内计数）</span>
+              <div id="pickDist" class="note">—</div></div>
+          </div>
+          <div class="hr"></div>
+          <h4 class="sub-h">分组 <span class="hint">priority 越小越先消耗；同 priority 多组按 weight 用 SWRR 分流（必须 &gt;0）</span>
+            <span class="grow"></span><button class="xs" id="btnGroupAdd">新增分组</button></h4>
+          <div class="tbl-wrap"><table class="acc">
+            <thead><tr><th>分组</th><th>优先级</th><th>权重</th><th>成员</th><th>份额</th><th class="c-acts"></th></tr></thead>
+            <tbody id="grpBody"></tbody>
+          </table></div>
+          <div class="hr"></div>
+          <h4 class="sub-h">账号权重 <span class="hint">weight 0 = 软摘除（不出池，只是不被选中）；key 支持全 UID 或 UID 前缀，最长匹配</span></h4>
+          <div class="tbl-wrap"><table class="acc">
+            <thead><tr><th>账号</th><th>分组</th><th>优先级</th><th>权重</th><th>最终权重</th><th>选中</th><th>占比</th></tr></thead>
+            <tbody id="pickAcctBody"></tbody>
+          </table></div>
+          <p class="ak-note">保存走配置页同通道（深合并 + 热生效，无需重启）。静态权重与积分/闲置动态权重相乘；分布计数重启归零。</p>
+          <div class="ak-error" id="pickError" role="status" hidden></div>
         </div>
       </div>
     </section>

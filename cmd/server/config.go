@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
 
@@ -164,6 +165,18 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// PickMode 轮询模式：weighted（缺省，现状 Top5+加权随机）/ swrr（平滑加权
+		// 轮询）/ priority（主备分档，同档内按 PickInner 选）。
+		PickMode string `json:"pick_mode"`
+		// PickInner priority 模式同档内算法：weighted（缺省）/ swrr。
+		PickInner string `json:"pick_inner"`
+		// Accounts 账号静态路由（key=全 UID 或 UID 前缀，最长匹配）：weight
+		// （缺省 1；0=软摘除）/ priority（缺省 0，越小越优先）/ group（缺省空）。
+		// nil/空 = 未配置（全员 weight=1 同级）。map 值类型见 pool 包。
+		Accounts map[string]pool.AccountRoute `json:"accounts"`
+		// Groups 分组静态路由（key=组名）：priority（缺省 0，越小越先消耗）/
+		// weight（同 priority 多组按 weight 用 SWRR 分流，必须 >0）。
+		Groups map[string]pool.GroupRoute `json:"groups"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -464,6 +477,15 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
+	}
+	// 轮询策略：pick_mode/pick_inner 归一（空回落缺省；非法 fail-fast）+
+	// 路由表校验（weight 负数/NaN、组 weight<=0、空键一律启动报错）。
+	// validateRoutes/normalizeMode 在 pool 包导出（SetPickPolicy 与 normalize 共用）。
+	if _, _, err := pool.NormalizePickMode(c.Pool.PickMode, c.Pool.PickInner); err != nil {
+		return err
+	}
+	if err := pool.ValidateRoutes(c.Pool.Accounts, c.Pool.Groups); err != nil {
+		return err
 	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3
