@@ -623,7 +623,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					"the upstream channel bound to this API key is disabled")
 				return
 			}
-			if ch.Realm != "" {
+			// realm 只对账号池渠道有意义（决定在哪个域选号）。外部上游渠道的"域"
+			// 由上游地址决定，残留的 realm 值不该把请求拦掉。
+			if ch.Realm != "" && !ch.IsExternal() {
 				if realmExplicit && realm != ch.Realm {
 					writeOpenAIError(w, http.StatusForbidden, "channel_realm_mismatch",
 						"model "+peek.Model+" belongs to realm "+realm+
@@ -632,7 +634,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				realm = ch.Realm // 裸名采用渠道域（不被缺省 cn 顶掉）
 			}
-			if !ChannelAllowedModel(ch.Models, bareModel) {
+			// 白名单的语义**按渠道类型分岔**，不能一律 403：
+			//   - 账号池渠道：硬性放行名单——不匹配即拒绝（该 key 只能调这些池模型）；
+			//   - 外部上游渠道：分流名单——不匹配的含义是"这个模型交给账号池"，
+			//     而不是"禁止使用"。在这里 403 会把池子原有模型整片打死，
+			//     正好废掉"绑定渠道 = 增加一组模型"的设计。
+			if !ch.IsExternal() && !ChannelAllowedModel(ch.Models, bareModel) {
 				writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
 					"model "+bareModel+" is not allowed for this API key")
 				return

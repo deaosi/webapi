@@ -2952,7 +2952,9 @@ async function chEditSubmit() {
     // 按类型组装：外部渠道带上上游接入三件套；账号池渠道清空上游字段
     // （从外部改回账号池时必须清空，否则残留的 url 仍会把请求转发出去）。
     const isExt = String($('chEditKind').value || '') === 'external';
-    const def = { label, realm, models, enabled };
+    // 外部渠道清空 realm：它的"域"由上游地址决定，留着上次账号池时代的残值只会
+    // 让人以为它还生效（面板已隐藏该字段，后端也按类型跳过校验，这里把数据也弄干净）。
+    const def = { label, realm: isExt ? '' : realm, models, enabled };
     if (isExt) {
       const url = String($('chEditUpstreamURL').value || '').trim();
       const key = String($('chEditUpstreamKey').value || '');
