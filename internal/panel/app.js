@@ -621,8 +621,23 @@ function pushConfigPatch(mutator) {
     const cfg = await api('config');
     const c = (cfg && cfg.config) || {};
     const pool = c.pool || {}, ch = c.channels || {};
+    // 读盘时把"缺字段"的老账号行补齐再组 state。为什么要补：早期版本只写
+    // weight/priority、没写 group，直接原样回写会把 group 弄丢——该号若被划到某个
+    // 渠道分组，会静默退回"无分组"，渠道隔离对它失效（且无任何报错）。
+    // 补齐口径与 Go 侧零值语义一致：weight 缺省不写（*=1）、priority 缺省 0、
+    // group 缺省 ""。
+    const accounts = {};
+    for (const uid of Object.keys(pool.accounts || {})) {
+      const r = pool.accounts[uid] || {};
+      const acct = { priority: 0, group: String(r.group || '') };
+      const w = Number(r.weight);
+      if (Number.isFinite(w)) acct.weight = w;
+      const p = Number(r.priority);
+      if (r.priority != null && Number.isFinite(p)) acct.priority = Math.trunc(p);
+      accounts[uid] = acct;
+    }
     const state = {
-      accounts: Object.assign({}, pool.accounts || {}),
+      accounts: accounts,
       groups: Object.assign({}, pool.groups || {}),
       chGroups: Object.assign({}, ch.groups || {}),
       chKeys: Object.assign({}, ch.keys || {}),
