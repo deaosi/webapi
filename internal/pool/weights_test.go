@@ -7,6 +7,9 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
+// f64 构造 AccountRoute/GroupRoute.Weight 指针（nil = 缺省 1；显式 0 = 软摘除）。
+func f64(v float64) *float64 { return &v }
+
 // 静态权重在 swrr 下严格按比例分流：3:1 打 400 次，容差带 ±15%。
 func TestSWRRRatio(t *testing.T) {
 	withNoPickGap(t)
@@ -18,7 +21,7 @@ func TestSWRRRatio(t *testing.T) {
 	// 余额拉平：w_base≈1+1+idle，让静态权重主导（idle 全 0 时 w_base 相等）。
 	// 注：lastUsed 零值给满分 idle——两号同为新号，idle 相等，w_base 相等。
 	if err := p.SetPickPolicy(PickSWRR, PickInnerWeighted,
-		map[string]AccountRoute{"u-high": {Weight: 3}, "u-low": {Weight: 1}}, nil); err != nil {
+		map[string]AccountRoute{"u-high": {Weight: f64(3)}, "u-low": {Weight: f64(1)}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	counts := map[string]int{}
@@ -90,7 +93,7 @@ func TestPriorityGroupSWRR(t *testing.T) {
 			"u-a1": {Group: "g1"},
 			"u-b1": {Group: "g2"},
 		},
-		map[string]GroupRoute{"g1": {Weight: 1}, "g2": {Weight: 1}}); err != nil {
+		map[string]GroupRoute{"g1": {Weight: f64(1)}, "g2": {Weight: f64(1)}}); err != nil {
 		t.Fatal(err)
 	}
 	seen := map[string]int{}
@@ -110,7 +113,7 @@ func TestWeightZeroExcludes(t *testing.T) {
 	p.SetCredits("u-keep", 100, 0)
 	p.SetCredits("u-drop", 100000, 0) // 余额再高也被摘除
 	if err := p.SetPickPolicy(PickWeighted, PickInnerWeighted,
-		map[string]AccountRoute{"u-drop": {Weight: 0}}, nil); err != nil {
+		map[string]AccountRoute{"u-drop": {Weight: f64(0)}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 20; i++ {
@@ -138,8 +141,8 @@ func TestWeightZeroExcludes(t *testing.T) {
 // 最长前缀匹配：全 UID 覆盖 8 位前缀。
 func TestLongestPrefixMatch(t *testing.T) {
 	routes := map[string]AccountRoute{
-		"0ba7c446":                  {Weight: 1},
-		"0ba7c446-0a15-401e-b0f1-447355efb1e7": {Weight: 5},
+		"0ba7c446":                  {Weight: f64(1)},
+		"0ba7c446-0a15-401e-b0f1-447355efb1e7": {Weight: f64(5)},
 	}
 	if got := routeWeight(routes, "0ba7c446-0a15-401e-b0f1-447355efb1e7"); got != 5 {
 		t.Errorf("全 UID 应命中 5: %v", got)
@@ -152,15 +155,44 @@ func TestLongestPrefixMatch(t *testing.T) {
 	}
 }
 
+// 权重三态：nil = 缺省 1（回归防护：只配 group/priority 的账号不能被零值误判成软摘除，
+// 否则整池候选被清空、pick 返回 nil）。
+func TestWeightNilDefaultsToOne(t *testing.T) {
+	routes := map[string]AccountRoute{"u1": {Group: "g1", Priority: 5}}
+	if got := routeWeight(routes, "u1"); got != 1 {
+		t.Errorf("nil weight 应缺省 1: %v", got)
+	}
+	if got := routeWeight(routes, "u2"); got != 1 {
+		t.Errorf("未配置应缺省 1: %v", got)
+	}
+	groups := map[string]GroupRoute{"g1": {Priority: 3}}
+	if got := groupWeight(groups, "g1"); got != 1 {
+		t.Errorf("组 nil weight 应缺省 1: %v", got)
+	}
+	if err := ValidateRoutes(routes, groups); err != nil {
+		t.Errorf("nil weight 合法（缺省）: %v", err)
+	}
+	// 只配 Group 的账号必须能正常参与选号（不会因 weight 零值被摘除）。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 100, 0)
+	if err := p.SetPickPolicy(PickPriority, PickInnerSWRR, routes, groups); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Pick(); got == nil || got.UID != "u1" {
+		t.Fatalf("仅配 group 的账号应可被选中: %+v", got)
+	}
+}
+
 // 校验：负权重/组 weight=0/空键/非法 mode 全报错。
 func TestValidateRoutes(t *testing.T) {
-	if err := ValidateRoutes(map[string]AccountRoute{"u": {Weight: -1}}, nil); err == nil {
+	if err := ValidateRoutes(map[string]AccountRoute{"u": {Weight: f64(-1)}}, nil); err == nil {
 		t.Errorf("负 weight 应报错")
 	}
-	if err := ValidateRoutes(nil, map[string]GroupRoute{"g": {Weight: 0}}); err == nil {
+	if err := ValidateRoutes(nil, map[string]GroupRoute{"g": {Weight: f64(0)}}); err == nil {
 		t.Errorf("组 weight=0 应报错")
 	}
-	if err := ValidateRoutes(map[string]AccountRoute{"": {Weight: 1}}, nil); err == nil {
+	if err := ValidateRoutes(map[string]AccountRoute{"": {Weight: f64(1)}}, nil); err == nil {
 		t.Errorf("空键应报错")
 	}
 	if _, _, err := NormalizePickMode("rr", ""); err == nil {
@@ -169,7 +201,7 @@ func TestValidateRoutes(t *testing.T) {
 	if _, _, err := NormalizePickMode("swrr", "fifo"); err == nil {
 		t.Errorf("非法 inner 应报错")
 	}
-	if err := ValidateRoutes(map[string]AccountRoute{"u": {Weight: 0}}, nil); err != nil {
+	if err := ValidateRoutes(map[string]AccountRoute{"u": {Weight: f64(0)}}, nil); err != nil {
 		t.Errorf("weight=0 合法（软摘除）: %v", err)
 	}
 }
@@ -204,7 +236,7 @@ func TestWeightedModeStaticMultiplier(t *testing.T) {
 	p.SetCredits("u-high", 100, 0)
 	p.SetCredits("u-low", 100, 0)
 	if err := p.SetPickPolicy(PickWeighted, PickInnerWeighted,
-		map[string]AccountRoute{"u-high": {Weight: 9}, "u-low": {Weight: 1}}, nil); err != nil {
+		map[string]AccountRoute{"u-high": {Weight: f64(9)}, "u-low": {Weight: f64(1)}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	counts := map[string]int{}

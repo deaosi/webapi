@@ -29,35 +29,48 @@ const (
 )
 
 // AccountRoute 单账号静态路由：运营意图层。
+//
+// Weight 用指针而非 float64：必须区分「未设置」（nil → 缺省 1）与「显式设 0」
+// （软摘除）。float64 零值无法表达这个三态——只配了 group/priority 的账号会被
+// 零值误判成软摘除，整池候选被清空（实测踩过：TestPriorityGroupSWRR）。
 type AccountRoute struct {
-	Weight   float64 `json:"weight"`   // >0 生效；0 = 软摘除（不出池，只是不被 pick）；缺省 1
-	Priority int     `json:"priority"` // 越小越优先（缺省 0 同级）
-	Group    string  `json:"group"`    // 缺省 ""（顶层账号直比）
+	Weight   *float64 `json:"weight,omitempty"`   // nil = 缺省 1；0 = 软摘除；>0 生效
+	Priority int      `json:"priority"`           // 越小越优先（缺省 0 同级）
+	Group    string   `json:"group,omitempty"`    // 缺省 ""（顶层账号直比）
 }
 
 // GroupRoute 分组静态路由。
 type GroupRoute struct {
-	Priority int     `json:"priority"` // 越小越先消耗；缺省 0
-	Weight   float64 `json:"weight"`   // 同 priority 多组按 weight 用 SWRR 分流；必须 >0
+	Priority int      `json:"priority"`         // 越小越先消耗；缺省 0
+	Weight   *float64 `json:"weight,omitempty"` // nil = 缺省 1；必须 >0（0 会让该组饿死）
 }
 
-// 有效性：Weight 必须 >=0（0 = 软摘除合法）；NaN 非法。
+// 有效性：AccountRoute.Weight nil 合法（缺省）；NaN/负数非法。
 func (r AccountRoute) valid() error {
-	if r.Weight != r.Weight {
+	if r.Weight == nil {
+		return nil
+	}
+	w := *r.Weight
+	if w != w {
 		return fmt.Errorf("weight 是 NaN")
 	}
-	if r.Weight < 0 {
-		return fmt.Errorf("weight %v 非法（必须 >=0，0=软摘除）", r.Weight)
+	if w < 0 {
+		return fmt.Errorf("weight %v 非法（必须 >=0，0=软摘除）", w)
 	}
 	return nil
 }
 
+// 有效性：GroupRoute.Weight nil 合法（缺省 1）；NaN/<=0 非法。
 func (r GroupRoute) valid() error {
-	if r.Weight != r.Weight {
+	if r.Weight == nil {
+		return nil
+	}
+	w := *r.Weight
+	if w != w {
 		return fmt.Errorf("weight 是 NaN")
 	}
-	if r.Weight <= 0 {
-		return fmt.Errorf("weight %v 非法（必须 >0）", r.Weight)
+	if w <= 0 {
+		return fmt.Errorf("weight %v 非法（必须 >0）", w)
 	}
 	return nil
 }
@@ -89,10 +102,18 @@ func resolveAccountRoute(routes map[string]AccountRoute, uid string) (AccountRou
 	return out, ok
 }
 
-// routeWeight 返回账号的生效权重：未配置 → 1；配置 Weight → 该值（0 = 软摘除）。
+// routeWeight 返回账号的生效权重：未配置或 Weight=nil → 1；显式 0 = 软摘除。
 func routeWeight(routes map[string]AccountRoute, uid string) float64 {
-	if r, ok := resolveAccountRoute(routes, uid); ok {
-		return r.Weight
+	if r, ok := resolveAccountRoute(routes, uid); ok && r.Weight != nil {
+		return *r.Weight
+	}
+	return 1
+}
+
+// groupWeight 返回组生效权重：未配置或 Weight=nil → 1。
+func groupWeight(groups map[string]GroupRoute, name string) float64 {
+	if g, ok := groups[name]; ok && g.Weight != nil {
+		return *g.Weight
 	}
 	return 1
 }
@@ -267,11 +288,7 @@ func (p *Pool) selectPriority(ws []weightedCand, now time.Time) *entry {
 	gw := make([]float64, len(order))
 	gc := make([]float64, len(order))
 	for i, g := range order {
-		w := 1.0
-		if gr, ok := p.pick.groups[g]; ok {
-			w = gr.Weight
-		}
-		gw[i] = w
+		gw[i] = groupWeight(p.pick.groups, g)
 		gc[i] = p.grpCurr[g]
 	}
 	gi := swrrPick(gw, gc)
@@ -499,7 +516,7 @@ func (p *Pool) PickPolicyStatus() PickPolicyView {
 	for _, n := range names {
 		g := p.pick.groups[n]
 		v.Groups = append(v.Groups, PickGroupStatus{
-			Name: n, Priority: g.Priority, Weight: g.Weight, Members: members[n],
+			Name: n, Priority: g.Priority, Weight: groupWeight(p.pick.groups, n), Members: members[n],
 		})
 	}
 	return v
