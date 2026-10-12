@@ -2884,9 +2884,9 @@ function chEditClearFetched() {
 // 会让人以为是这次的结论。
 function chEditClearTest() {
   const out = $('chEditTestOut');
-  if (out) { out.hidden = true; out.textContent = ''; out.className = 'ch-test-out'; }
+  if (out) { out.hidden = true; out.innerHTML = ''; out.className = 'ch-test-out'; }
   const note = $('chEditTestNote');
-  if (note) note.textContent = '真实发一条最小请求，把上游原话显示出来（余额不足 / 密钥无效 / 地址写错都能看出来）';
+  if (note) note.textContent = '对渠道里的模型逐个真实探一次（各发 1 token），把上游原话显示出来';
 }
 
 function chEditModelTokens() {
@@ -2911,7 +2911,7 @@ function chEditToggleFetched(id) {
   chEditRenderFetched(Array.from($('chEditFetchList').children).map(el => el.dataset.m));
 }
 
-// chEditTestUpstream 真实探一次上游，把原始状态码与响应体贴到面板上。
+// chEditTestUpstream 对渠道里的模型**逐个**真实探测，把每一项的原始状态贴到面板上。
 //
 // 存在理由：上游余额不足(402)/密钥无效(401)/地址写错(404) 这些信息只在上游自己的
 // 响应里，网关既不缓存也不翻译。没有这个按钮，运维只能发真实业务请求去撞，而撞到的
@@ -2923,27 +2923,49 @@ async function chEditTestUpstream() {
   const out = $('chEditTestOut');
   const isCreate = !$('chEditName').disabled;
   if (isCreate) {
-    note.textContent = '请先保存该渠道，之后在「编辑」里测试上游';
+    note.textContent = '请先保存该渠道，之后在「编辑」里测试渠道';
     return;
   }
   btn.disabled = true; const oldTxt = btn.textContent; btn.textContent = '测试中…';
-  note.textContent = '正在请求上游…';
-  out.hidden = true; out.textContent = ''; out.className = 'ch-test-out';
+  note.textContent = '正在逐个探测上游模型…';
+  out.hidden = true; out.innerHTML = ''; out.className = 'ch-test-out';
   try {
     const r = await api('channels/test_upstream', {
       method: 'POST', body: JSON.stringify({ channel: chEditState.name }),
     });
-    if (r && r.ok) {
-      note.textContent = '上游可用（HTTP ' + r.status + ' · ' + (r.elapsed || '?') + ' · 探测模型 ' + (r.model || '?') + '）';
-      out.className = 'ch-test-out ok';
-      out.textContent = r.body || '(空响应体)';
-    } else {
-      note.textContent = (r && r.status)
-        ? '上游返回 HTTP ' + r.status + '（' + (r.elapsed || '?') + '）'
-        : '探测失败';
+    if (r && r.error) {
+      note.textContent = '探测失败';
       out.className = 'ch-test-out bad';
-      out.textContent = (r && r.body) ? r.body : ((r && r.error) || '未知错误');
+      out.innerHTML = '<div class="ch-test-sum">' + esc(r.error) + '</div>';
+      out.hidden = false;
+      return;
     }
+    const rows = (r && r.models) || [];
+    if (!rows.length) {
+      note.textContent = '没有可测的模型';
+      out.className = 'ch-test-out bad';
+      out.innerHTML = '<div class="ch-test-sum">该渠道没有可测的模型（白名单为空且上游模型表为空）</div>';
+      out.hidden = false;
+      return;
+    }
+    const failCnt = Number(r.fail_count || 0);
+    const okCnt = Number(r.ok_count || 0);
+    note.textContent = '共 ' + rows.length + ' 个模型：' + okCnt + ' 个可用'
+      + (failCnt ? '，' + failCnt + ' 个失败' : '')
+      + (r.truncated ? '（另有 ' + r.truncated + ' 个未测）' : '');
+    out.className = 'ch-test-out ' + (failCnt ? 'bad' : 'ok');
+    out.innerHTML = rows.map(function (m) {
+      const ok = !!m.ok;
+      // 失败行把上游原话原文贴上：402/401/404 指向的是三种完全不同的处置动作，
+      // 由文案概括反而会丢掉关键信息。
+      const detail = ok
+        ? ('HTTP ' + m.status + ' · ' + (m.elapsed || '?'))
+        : ('HTTP ' + (m.status || '—') + ' · ' + ((m.body || m.error || '').slice(0, 200) || '无响应体'));
+      return '<div class="ch-test-row ' + (ok ? 'ok' : 'fail') + '">' +
+        '<span class="m">' + (ok ? '✓' : '✗') + ' ' + esc(m.model) + '</span>' +
+        '<span class="s">' + esc(ok ? '' : '失败') + '</span>' +
+        '<span class="b" title="' + esc(detail) + '">' + esc(detail) + '</span></div>';
+    }).join('');
     out.hidden = false;
   } catch (e) {
     note.textContent = '探测失败：' + e.message;

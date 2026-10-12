@@ -311,12 +311,19 @@ h4.sub-h .grow { flex: 1; }
 .pick-share > i { display: block; height: 100%; background: var(--accent); }
 /* 剩余配额段：同一根条里"已消耗(深)/配额(浅)"对照，配置权重直观可见 */
 .pick-share > b { display: block; height: 100%; background: color-mix(in srgb, var(--accent) 32%, transparent); }
-/* 上游探测结果：上游原话（JSON）直接贴出来，成功绿边失败红边 */
-.ch-test-out { margin: 6px 0 0; padding: 8px 10px; border-radius: 6px; max-height: 160px; overflow: auto;
-  font: 500 11.5px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all;
+/* 渠道探测结果：逐模型一行，成功绿点失败红点，右侧贴上游原话 */
+.ch-test-out { margin: 6px 0 0; padding: 8px 10px; border-radius: 6px; max-height: 230px; overflow: auto;
   background: var(--surface-2); border: 1px solid var(--line); }
 .ch-test-out.ok { border-color: color-mix(in srgb, var(--ok, #16a34a) 55%, var(--line)); }
 .ch-test-out.bad { border-color: color-mix(in srgb, var(--bad, #dc2626) 55%, var(--line)); }
+.ch-test-sum { font: 600 11.5px/1.6 ui-sans-serif, system-ui, sans-serif; margin-bottom: 5px; }
+.ch-test-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0;
+  font: 500 11.5px/1.5 ui-monospace, monospace; border-top: 1px dashed var(--line); }
+.ch-test-row:first-of-type { border-top: 0; }
+.ch-test-row > .m { flex: 0 0 auto; min-width: 150px; }
+.ch-test-row > .s { flex: 0 0 auto; }
+.ch-test-row > .b { flex: 1 1 auto; color: var(--ink-3); word-break: break-all; }
+.ch-test-row.fail > .m { color: var(--bad, #dc2626); }
 /* 上游模型候选：紧凑标签，点一下加入/移出白名单 */
 .ch-models { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .ch-models > span { font: 500 11px/1 ui-monospace, monospace; padding: 4px 7px; border-radius: 4px;
@@ -1014,9 +1021,9 @@ select.grp-sel { max-width: 130px; }
                 <option value="openai">openai（OpenAI 兼容）</option>
               </select></label>
             <div class="fld">
-              <button type="button" class="xs" id="chEditTestBtn" data-act="chtest-upstream">测试上游</button>
-              <span class="hint" id="chEditTestNote">真实发一条最小请求，把上游原话显示出来（余额不足 / 密钥无效 / 地址写错都能看出来）</span>
-              <pre class="ch-test-out" id="chEditTestOut" hidden></pre>
+              <button type="button" class="xs" id="chEditTestBtn" data-act="chtest-upstream">测试渠道</button>
+              <span class="hint" id="chEditTestNote">对渠道里的模型逐个真实探一次（各发 1 token），把上游原话显示出来</span>
+              <div class="ch-test-out" id="chEditTestOut" hidden></div>
             </div>
           </div>
 

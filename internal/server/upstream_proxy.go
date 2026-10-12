@@ -149,6 +149,35 @@ func isStreamResponse(ct string) bool {
 	return strings.Contains(ct, "text/event-stream") || strings.Contains(ct, "application/x-ndjson")
 }
 
+// ProbeUpstreamModels 逐个探测一批模型，返回每项的原始状态。
+//
+// 为什么不是"探一个模型就下结论"：上游的 /models 只说明"这个模型挂在它门口"，
+// 不代表**这个 key 有权调用它**——同一个上游里常见有的模型正常、有的直接回
+// 402 余额不足 / 403 无权限 / 404 未开通。只测一个等于用一个样本回答
+// "整个渠道能不能用"，会给出错误结论。所以逐个探，让面板列出每一项的结果。
+//
+// 并发受 parallel 限制（一次面板点击不该把外部上游打爆）；结果顺序与入参一致，
+// 便于面板稳定对照显示。
+func ProbeUpstreamModels(base, key, label string, models []string, parallel int) []map[string]any {
+	if parallel < 1 {
+		parallel = 1
+	}
+	out := make([]map[string]any, len(models))
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i, m := range models {
+		wg.Add(1)
+		go func(idx int, model string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[idx] = ProbeUpstream(base, key, model)
+		}(i, m)
+	}
+	wg.Wait()
+	return out
+}
+
 // ProbeUpstream 对上游做一次最小可用性探测（真实发一条 1-token chat），
 // 把上游的**原始状态码与响应体**带回来。
 //

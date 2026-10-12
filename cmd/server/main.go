@@ -315,9 +315,12 @@ func main() {
 			}
 			return server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label)
 		},
-		// 渠道页"测试上游"：真实发一条最小请求，把上游的原始状态码与响应体带回面板。
-		// 余额不足(402)/密钥无效(401)/路径写错(404) 这类问题只能从上游原话里看出来，
-		// 否则运维只能靠发真实业务请求去撞，撞到的 402 还会被客户端当自身故障。
+		// 渠道页"测试渠道"：**逐个模型**真实探一次，返回每一项的原始状态码与响应体。
+		//
+		// 为什么按模型而不是"探一次就算渠道可用"：上游的 /models 只说明模型挂在它门口，
+		// 不代表这个 key 有权调用——实测同一上游里有的模型正常、有的直接 402 余额不足 /
+		// 404 未开通。只测一个样本会给出"整个渠道能不能用"的错误结论。
+		// 余额不足(402)/密钥无效(401)/路径写错(404) 这类问题也只能从上游原话看出来。
 		TestUpstream: func(name string) map[string]any {
 			def, ok := chRouter.defByName(name)
 			if !ok {
@@ -326,23 +329,54 @@ func main() {
 			if !def.IsExternal() {
 				return map[string]any{"ok": false, "error": fmt.Sprintf("渠道 %q 不是外部上游渠道（未填请求地址）", name)}
 			}
-			// 探测模型：优先用白名单里第一个具体模型；白名单为空或全是通配时，
-			// 拉上游模型表取第一个——没有模型名就无法构造一次合法探测。
-			model := ""
+
+			// 待测模型清单：
+			//   - 白名单非空 → 测白名单里的具体模型（通配条目无法直接调用，跳过）——
+			//     这正是"这个密钥会走上游的那些模型"，测的就是真实生效面；
+			//   - 白名单为空 → 全部模型走上游，那就拉上游模型表全测一遍。
+			models := make([]string, 0, len(def.Models))
 			for _, m := range def.Models {
 				if m = strings.TrimSpace(m); m != "" && !strings.HasSuffix(m, "*") {
-					model = m
-					break
+					models = append(models, m)
 				}
 			}
-			if model == "" {
-				if ids, err := server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label); err == nil && len(ids) > 0 {
-					model = ids[0]
-				} else if err != nil {
-					return map[string]any{"ok": false, "error": "无法确定探测模型（拉取上游模型失败：" + err.Error() + "）"}
+			if len(models) == 0 {
+				ids, err := server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label)
+				if err != nil {
+					return map[string]any{"ok": false,
+						"error": "无法确定待测模型（拉取上游模型失败：" + err.Error() + "）"}
+				}
+				models = ids
+			}
+			if len(models) == 0 {
+				return map[string]any{"ok": false,
+					"error": "该渠道没有可测的模型（白名单为空且上游模型表为空）"}
+			}
+			// 上限保护：白名单为空时可能是上游的全部模型（几十个），
+			// 一次点击不该向外部上游发射无上限的请求。
+			const maxProbe = 50
+			truncated := 0
+			if len(models) > maxProbe {
+				truncated = len(models) - maxProbe
+				models = models[:maxProbe]
+			}
+
+			results := server.ProbeUpstreamModels(def.UpstreamURL, def.UpstreamKey, def.Label, models, 4)
+			okCount := 0
+			for _, r := range results {
+				if b, _ := r["ok"].(bool); b {
+					okCount++
 				}
 			}
-			return server.ProbeUpstream(def.UpstreamURL, def.UpstreamKey, model)
+			return map[string]any{
+				"ok":           okCount == len(results),
+				"upstream_url": def.UpstreamURL,
+				"total":        len(results),
+				"ok_count":     okCount,
+				"fail_count":   len(results) - okCount,
+				"truncated":    truncated,
+				"models":       results,
+			}
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
