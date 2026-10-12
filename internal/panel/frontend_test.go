@@ -582,7 +582,9 @@ sandbox.mockAPI = async (path, options) => {
 };
 run('api = mockAPI');
 (async () => {
-  run(`overviewData = { accounts: [], pick: {
+  // 夹具用 Node 侧对象 + JSON.stringify 注入：本测试脚本体是 Go 反引号原始字符串，
+  // 内部不能再出现反引号（否则提前截断），故不走 JS 模板字面量。
+  const pickFixture = { accounts: [], pick: {
     mode: 'priority', inner: 'swrr',
     groups: [{ name: 'main', priority: 0, weight: 1, members: 1 },
              { name: 'backup', priority: 10, weight: 1, members: 1 }],
@@ -590,7 +592,8 @@ run('api = mockAPI');
       { uid: 'u-main-0001', weight: 3, priority: 0, group: 'main', w_final: 12.5, sw_current: 0, picks: 30 },
       { uid: 'u-back-0002', weight: 1, priority: 10, group: 'backup', w_final: 4.2, sw_current: 0, picks: 10 }
     ],
-    distribution: { 'u-main-0001': 30, 'u-back-0002': 10 } } };`);
+    distribution: { 'u-main-0001': 30, 'u-back-0002': 10 } } };
+  run('overviewData = ' + JSON.stringify(pickFixture));
   run('renderPick()');
   assert.strictEqual(get('pickMode').value, 'priority');
   assert.strictEqual(get('pickInner').value, 'swrr');

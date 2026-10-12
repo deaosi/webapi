@@ -254,6 +254,10 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// pick 轮询策略段（模式/分组/账号静态权重/分布计数）：与面板 /panel/api/overview
+		// 的 pick 段同源（pool.PickPolicyStatus 单一事实来源），运维在 /status 一处即可
+		// 读到「谁被选中、为什么」（weight=0 摘除 / priority 档位 / SWRR 累积）。
+		"pick": h.cfg.Pool.PickPolicyStatus(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,

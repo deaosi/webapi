@@ -14,34 +14,37 @@ import (
 // Pick 单一选号入口（无请求级轮换、无 realm 过滤，模型感知缺省账号级）。
 // 需要请求级轮换（tried）或分池（realm）时用 PickExcludingForRealm。
 func (p *Pool) Pick() *auth.Auth {
-	return p.pick(nil, "", "")
+	return p.pickLocked(nil, "", "")
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
 // 挑选策略：healthy 账号中按权重取前 5 名，再在 Top5 内按同一权重加权随机抽签，
 // 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
-	return p.pick(tried, "", "")
+	return p.pickLocked(tried, "", "")
 }
 
 // PickExcludingForModel 模型感知选号：等同 PickExcluding，但对「6004 模型级冷却中的
 // 账号」进行模型豁免——请求模型与其 trigger 模型不同时视为可用（issue #31）。
 // reqModel 为空时即普通 PickExcluding（不影响既有调用语义）。
 func (p *Pool) PickExcludingForModel(tried map[string]bool, reqModel string) *auth.Auth {
-	return p.pick(tried, reqModel, "")
+	return p.pickLocked(tried, reqModel, "")
 }
 
 // PickExcludingForRealm 模型感知 + 分池选号：候选集先按 Realm()==realm 过滤
 // （realm 空 = 不过滤，退化为 PickExcludingForModel），再按模型健康口径判定。
 // 供 handler 在 global/cn 双域下分流（global 模型请求只路由 global 账号）。
 func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm string) *auth.Auth {
-	return p.pick(tried, reqModel, realm)
+	return p.pickLocked(tried, reqModel, realm)
 }
 
-// pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
+// pickLocked 在 healthy 候选集中按权重策略选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。
-func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
+//
+// 命名带 Locked 后缀（同 reviveCoolingLocked/pickEarliestExpiryLocked 惯例）：
+// Pool 结构体已有 pick 字段（pickPolicy 策略表），方法不能同名。
+func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -149,7 +152,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			wb := p.weightOf(e, maxCredits, now)
 			wf := wb * cfg
 			p.lastW[e.a.UID] = wf
-			ws = append(ws, weightedCand{e: e, w: wf, wBase: wb, tier: ti, cost1k: ci})
+			ws = append(ws, weightedCand{e: e, w: wf, cost1k: ci})
 		}
 	}
 	if len(ws) == 0 {
@@ -211,11 +214,6 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	for _, c := range ws {
 		cands = append(cands, c.e)
 	}
-	// wsByUID 同层过滤后 w_final 索引：swrr/priority 选择用；weighted 沿用比较器口径。
-	wsByUID := make(map[string]float64, len(ws))
-	for _, c := range ws {
-		wsByUID[c.e.a.UID] = c.w
-	}
 	// candsAll 保留截断前的全候选（权重降序），供 LRU 兜底在全量范围选最旧者，
 	// 避免 top5 字典序截断把等权重靠后账号饿死（惊群根因之一）。
 	// swrr 模式：全候选 SWRR（不截断 Top5——截断会扭曲权重比例；打散由 SWRR 自带）。
@@ -257,7 +255,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 	}
 	if e == nil {
-		e = p.selectByMode(ws, wsByUID, cands, candsAll, now)
+		e = p.selectByMode(ws, cands, candsAll, now)
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。

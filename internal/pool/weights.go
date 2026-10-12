@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // PickMode 权重选择模式。缺省 weighted（现状：Top5 + 加权随机）。
@@ -180,25 +181,23 @@ func swrrPick(weights []float64, curr []float64) int {
 	return best
 }
 
-// weightedCand 同成本层过滤后的候选行：e + w_final + w_base + tier + 单价。
-// w_final = w_base × weight_cfg（静态权重乘子）；lastW 与 PickPolicyStatus 同源。
+// weightedCand 同成本层过滤后的候选行。
+// w = w_final = w_base × weight_cfg（静态权重乘子）；cost1k = 该模型实测单价（层内排序用）。
 type weightedCand struct {
 	e      *entry
-	w      float64 // w_final
-	wBase  float64
-	tier   int
-	cost1k float64
+	w      float64 // w_final（含静态权重乘子；lastW 同源）
+	cost1k float64 // 实测单价（tier 2 层内低者优先；tier 0/1 恒 0）
 }
 
 // selectByMode 按 pick.mode 在同层候选中选择（调用方已持 pick 写锁）。
 // cands: weighted 模式 Top5 / 其他模式全量（权重降序）；candsAll: 全量（权重降序）。
-// now: 本次 pick 时刻（minPickGap 判定用）。
-func (p *Pool) selectByMode(ws []weightedCand, wsByUID map[string]float64, cands, candsAll []*entry, now time.Time) *entry {
+// now: 本次 pick 时刻（minPickGap 判定用）。w_final 随 weightedCand 携带，无需另传表。
+func (p *Pool) selectByMode(ws []weightedCand, cands, candsAll []*entry, now time.Time) *entry {
 	switch p.pick.mode {
 	case PickSWRR:
-		return p.selectSWRR(ws, wsByUID)
+		return p.selectSWRR(ws)
 	case PickPriority:
-		return p.selectPriority(ws, wsByUID, cands, candsAll, now)
+		return p.selectPriority(ws, now)
 	default:
 		return p.selectWeightedLegacy(cands, candsAll, now)
 	}
@@ -226,10 +225,9 @@ func (p *Pool) selectWeightedLegacy(cands, candsAll []*entry, now time.Time) *en
 }
 
 // selectSWRR 全候选平滑加权轮询：不截断、不看 minPickGap（SWRR 自带打散；
-// 并发撞号由 pick 末尾的 lastUsed 标记 + 上游在途租约承接）。
-// swCurr 缺键按 0 起步；选中后记分布（recordPickLocked 由调用方统一？不——
-// 此处直接记，pick 末尾不再重复记，见 pick() 尾部注释）。
-func (p *Pool) selectSWRR(ws []weightedCand, wsByUID map[string]float64) *entry {
+// 并发撞号由 pickLocked 末尾的 lastUsed 标记 + 上游在途租约承接）。
+// swCurr 缺键按 0 起步。
+func (p *Pool) selectSWRR(ws []weightedCand) *entry {
 	weights := make([]float64, len(ws))
 	curr := make([]float64, len(ws))
 	for i, c := range ws {
@@ -240,7 +238,6 @@ func (p *Pool) selectSWRR(ws []weightedCand, wsByUID map[string]float64) *entry 
 	for i, c := range ws {
 		p.swCurr[c.e.a.UID] = curr[i]
 	}
-	_ = wsByUID
 	return ws[idx].e
 }
 
@@ -248,8 +245,8 @@ func (p *Pool) selectSWRR(ws []weightedCand, wsByUID map[string]float64) *entry 
 //   - 同档有多组 → 组权重 SWRR 选组（grpCurr 运行态），组内按 pick.inner 选号；
 //   - 同档单组/无组（group="" 顶层账号）→ 按 pick.inner 直接选号。
 // inner=weighted 时沿用 Top5+pickWeighted（含 minPickGap/LRU）；inner=swrr 时 SWRR。
-// ws 已是同 priority 档成员（pick() 内按 effectivePriorityLocked 取最小档过滤）。
-func (p *Pool) selectPriority(ws []weightedCand, wsByUID map[string]float64, cands, candsAll []*entry, now time.Time) *entry {
+// ws 已是同 priority 档成员（pickLocked 内按 effectivePriorityLocked 取最小档过滤）。
+func (p *Pool) selectPriority(ws []weightedCand, now time.Time) *entry {
 	// 按组聚类（保持 ws 权重降序内稳定）。
 	groups := map[string][]weightedCand{}
 	order := []string{}
@@ -262,9 +259,9 @@ func (p *Pool) selectPriority(ws []weightedCand, wsByUID map[string]float64, can
 	}
 	// 单组（或全无组）→ 组内直选。
 	if len(order) == 1 {
-		return p.selectInner(groups[order[0]], wsByUID, cands, candsAll, now)
+		return p.selectInner(groups[order[0]], now)
 	}
-	// 多组：组权重 SWRR 选组。组权重 = groups 表 weight（缺省 1；validateRoutes
+	// 多组：组权重 SWRR 选组。组权重 = groups 表 weight（缺省 1；ValidateRoutes
 	// 已保证 >0）。组内成员全 healthy（ws 前置过滤），故选中组必有可用号。
 	sort.Strings(order) // 稳定组序（SWRR current 按序索引）
 	gw := make([]float64, len(order))
@@ -281,13 +278,13 @@ func (p *Pool) selectPriority(ws []weightedCand, wsByUID map[string]float64, can
 	for i, g := range order {
 		p.grpCurr[g] = gc[i]
 	}
-	return p.selectInner(groups[order[gi]], wsByUID, cands, candsAll, now)
+	return p.selectInner(groups[order[gi]], now)
 }
 
 // selectInner 同档/同组内按 pick.inner 选择。
-func (p *Pool) selectInner(members []weightedCand, wsByUID map[string]float64, cands, candsAll []*entry, now time.Time) *entry {
+func (p *Pool) selectInner(members []weightedCand, now time.Time) *entry {
 	if p.pick.inner == PickInnerSWRR {
-		return p.selectSWRR(members, wsByUID)
+		return p.selectSWRR(members)
 	}
 	// weighted：成员按 w_final 降序取 Top5（成员不足 5 全取），minPickGap + pickWeighted + LRU。
 	sort.SliceStable(members, func(i, j int) bool {
@@ -367,9 +364,10 @@ func (p *Pool) SetPickPolicy(mode PickMode, inner PickInner, accounts map[string
 	}
 	if accounts != nil {
 		p.pick.accounts = accounts
-		// 路由表变更 → SWRR current 清零重学（旧 current 按旧权重累积，新权重下失真）。
+		// 路由表变更 → SWRR current 与末次 w_final 清零重学（旧值按旧权重累积，新权重下失真）。
 		p.swCurr = map[string]float64{}
 		p.grpCurr = map[string]float64{}
+		p.lastW = map[string]float64{}
 	}
 	if groups != nil {
 		p.pick.groups = groups
@@ -383,17 +381,6 @@ func (p *Pool) PickPolicy() (mode PickMode, inner PickInner) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.pick.mode, p.pick.inner
-}
-
-// PickRouteOf 返回账号的静态路由解析结果（/status pick.accounts 行用）。
-// 未配置 → (1, 0, "")。
-func (p *Pool) PickRouteOf(uid string) (weight float64, priority int, group string) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	weight = routeWeight(p.pick.accounts, uid)
-	priority = routePriority(p.pick.accounts, uid)
-	group = routeGroup(p.pick.accounts, uid)
-	return weight, priority, group
 }
 
 // groupPriority 组优先级：未在 groups 表 → 0（与账号缺省对齐）。
