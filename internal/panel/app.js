@@ -2675,13 +2675,17 @@ function renderChannels() {
     const d = chState.defs[n] || {};
     const members = channelMemberNames(n);
     const enabled = d.enabled !== false;
-    const mTag = members.length
-      ? '<span class="tag ok">' + members.length + ' 个</span>'
-      : '<span class="tag warn">无成员</span>';
+    const isExt = !!(d.upstream_url);
+    // 成员列：外部上游渠道**不需要**成员账号（请求直接转发到上游端点，不进账号池），
+    // 所以这里既不显示数量也不打"无成员"警告——那会让人以为"得先去账号池塞几个号"。
+    const mTag = isExt
+      ? '<span class="note" title="外部上游渠道直接转发，不使用账号池">—</span>'
+      : (members.length
+        ? '<span class="tag ok">' + members.length + ' 个</span>'
+        : '<span class="tag warn">无成员</span>');
     const eTag = enabled ? '' : ' <span class="tag bad">停用</span>';
     const wl = chModelListText(d.models);
     const rt = chState.route[n] || {};
-    const isExt = !!(d.upstream_url);
     const kindTag = isExt ? '<span class="tag ok">外部上游</span>' : '<span class="tag">账号池</span>';
     const urlCell = isExt
       ? '<span class="id" title="' + esc(d.upstream_url) + '">' + esc(String(d.upstream_url).replace(/^https?:\/\//i, '')) + '</span>'
@@ -2714,6 +2718,14 @@ function renderChannels() {
       eff = '<span class="tag bad">分组未定义</span>';
     } else if (chState.defs[bound].enabled === false) {
       eff = '<span class="tag bad">渠道已停用 → 请求 403</span>';
+    } else if (chState.defs[bound].upstream_url) {
+      // 外部上游渠道：生效条件与账号池无关——请求直接转发到该端点。
+      // 命中白名单的模型走上游，其余回落账号池（两组模型都能用）。
+      const host = esc(String(chState.defs[bound].upstream_url).replace(/^https?:\/\//i, ''));
+      const wl = (chState.defs[bound].models || []).length;
+      eff = '<span class="tag ok" title="请求转发到 ' + esc(chState.defs[bound].upstream_url) +
+        '；未命中白名单的模型回落账号池">外部上游 ' + host +
+        (wl ? ' · 白名单 ' + wl + ' 项' : ' · 全部模型') + '</span>';
     } else {
       const cnt = channelMemberNames(bound).length;
       eff = cnt ? '<span class="tag ok">限 ' + esc(bound) + ' · ' + cnt + ' 个账号</span>'
@@ -3074,11 +3086,20 @@ function keyBindModal(id) {
   keyBindState.opener = document.activeElement;
   $('keyBindTitle').textContent = '绑定密钥「' + (k.name || k.prefix || id.slice(0, 8)) + '」';
   const cur = chState.keys[id] || '';
-  $('keyBindSel').innerHTML = '<option value="">（不限制，全池可用）</option>' + chGroupNames().map(n =>
-    '<option value="' + esc(n) + '"' + (cur === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
+  $('keyBindSel').innerHTML = '<option value="">（不限制，全池可用）</option>' + chGroupNames().map(n => {
+    const def = chState.defs[n] || {};
+    const kind = def.upstream_url ? '外部上游' : '账号池';
+    return '<option value="' + esc(n) + '"' + (cur === n ? ' selected' : '') + '>' +
+      esc(n) + '（' + kind + '）</option>';
+  }).join('');
+  const curDef = cur ? (chState.defs[cur] || {}) : {};
   $('keyBindHint').textContent = cur
-    ? '当前绑定到「' + cur + '」。改选即切换，选"不限制"即解绑。'
-    : '未绑定：该密钥全池可用。选一个分组即只走同组账号。';
+    ? (curDef.upstream_url
+      ? '当前绑定到外部上游「' + cur + '」：请求直接转发到 ' + curDef.upstream_url +
+        '（不需要账号池成员），未命中白名单的模型回落账号池。'
+      : '当前绑定到账号池渠道「' + cur + '」：只走同组账号；改选即切换，选"不限制"即解绑。')
+    : '未绑定：该密钥全池可用。选一个渠道即按该渠道路由'
+      + '（外部上游看白名单分流，账号池分组只走同组账号）。';
   keyBindErr('');
   $('keyBindSave').disabled = false; $('keyBindSave').textContent = '保存';
   $('keyBindVeil').classList.add('on');

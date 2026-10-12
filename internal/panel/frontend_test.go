@@ -809,8 +809,11 @@ sandbox.mockAPI = async (path, options) => {
     channels: {
       enabled: true,
       groups: { main: { label: '主渠道', realm: 'cn', models: ['glm-5*'], enabled: true },
-                dead: { label: '', realm: '', models: [], enabled: false } },
-      keys: { 'key-1': 'main' },
+                dead: { label: '', realm: '', models: [], enabled: false },
+                ext: { label: '外部示例', realm: '', models: ['glm-5.1'], enabled: true,
+                       upstream_url: 'https://up.example.com/v1', upstream_key: 'sk-up-secret',
+                       upstream_type: 'openai' } },
+      keys: { 'key-1': 'main', 'key-2': 'ext' },
     } } };
   if (String(path).indexOf('api_keys') >= 0) return { ok: true, keys: [
     { id: 'key-1', name: '对外A', prefix: 'sk-wb2a-aaaa1111', enabled: true, created_at: '' },
@@ -824,8 +827,8 @@ run('api = mockAPI');
 (async () => {
   await run('loadChannels()');
   assert.strictEqual(get('chEnabled').checked, true);
-  assert(get('chNote').textContent.indexOf('2 个渠道定义') >= 0, '应显示渠道数');
-  assert(get('chNote').textContent.indexOf('1 条密钥绑定') >= 0, '应显示绑定数');
+  assert(get('chNote').textContent.indexOf('3 个渠道定义') >= 0, '应显示渠道数');
+  assert(get('chNote').textContent.indexOf('2 条密钥绑定') >= 0, '应显示绑定数');
   const ghtml = get('chGroupBody').innerHTML;
   // 三行合一：名/label/白名单/members/停用都落在同一行字符串里才能查（“三分开”是上次权重列的坑）。
   assert(ghtml.indexOf('主渠道') >= 0, '定义行应带展示名');
@@ -838,6 +841,16 @@ run('api = mockAPI');
   assert(khtml.indexOf('已禁用') >= 0, '禁用的 key 应有标记');
   assert(khtml.indexOf('data-act="key-bind"') >= 0, '绑定行应有“绑定”按钮（弹窗编辑入口）');
   assert(ghtml.indexOf('data-act="ch-edit"') >= 0, '渠道行应有“编辑”按钮（弹窗编辑入口）');
+  // 外部上游渠道**不需要**成员账号：请求直接转发到上游端点，根本不进账号池。
+  // 曾按"账号池分组"口径判断，于是绑了 key 还显示"该分组无成员账号 → 请求失败"，
+  // 让人以为得先去账号池塞几个号（实测被用户当场指出）。
+  assert(khtml.indexOf('无成员账号') < 0, '外部渠道不该出现"该分组无成员账号"');
+  assert(khtml.indexOf('外部上游 up.example.com/v1') >= 0,
+    '绑定到外部渠道的生效列应显示上游地址，实得 ' + khtml.slice(0, 200));
+  assert(ghtml.indexOf('up.example.com/v1') >= 0, '渠道表应显示外部上游地址');
+  // 该行成员列必须是"—"（不适用），不能是警告徽标
+  assert(/ext[\s\S]{0,400}?不适用|ext[\s\S]{0,400}?<span class="note"[^>]*>—<\/span>/.test(ghtml),
+    '外部渠道的成员列应显示"—"而不是"无成员"警告');
   // 渠道编辑弹窗提交：改 main 的 label+白名单，只动这一条定义。
   run('chEditModal("edit", "main")');
   get('chEditLabel').value = '主渠道V2';
