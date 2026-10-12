@@ -88,6 +88,13 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, ch ChannelInfo, raw
 			w.Header().Set(h, v)
 		}
 	}
+	// 上游非 2xx：透传其状态码与响应体（上游的错误信息比网关编造的更有用），
+	// 但对 404 追加一句排障提示——实测最常见的成因是 base_url 漏了 /v1 前缀
+	// （拼出来成了 "<host>/chat/completions"，上游自然 404）。
+	if resp.StatusCode == http.StatusNotFound {
+		log.Printf("WARN: [server] upstream channel %q 404：请检查 upstream_url 是否含 /v1 前缀（当前 %q → %s）",
+			ch.Label, base, target)
+	}
 	w.WriteHeader(resp.StatusCode)
 
 	// 流式（SSE）要边收边发：客户端等着首字节，不能等上游整条流结束再写。
