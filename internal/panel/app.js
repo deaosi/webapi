@@ -2721,11 +2721,19 @@ function renderChannels() {
     } else if (chState.defs[bound].upstream_url) {
       // 外部上游渠道：生效条件与账号池无关——请求直接转发到该端点。
       // 命中白名单的模型走上游，其余回落账号池（两组模型都能用）。
+      const url = esc(chState.defs[bound].upstream_url);
       const host = esc(String(chState.defs[bound].upstream_url).replace(/^https?:\/\//i, ''));
       const wl = (chState.defs[bound].models || []).length;
-      eff = '<span class="tag ok" title="请求转发到 ' + esc(chState.defs[bound].upstream_url) +
-        '；未命中白名单的模型回落账号池">外部上游 ' + host +
-        (wl ? ' · 白名单 ' + wl + ' 项' : ' · 全部模型') + '</span>';
+      // 空白名单 = **全部**模型走上游、不回落账号池：上游一旦不可用（余额不足/宕机），
+      // 这把 key 就整个失效。这是个实测踩过的坑（绑完发现"所有模型都报余额不足"），
+      // 所以空白名单用警示色，并在 tooltip 里说清怎么恢复兜底。
+      eff = wl
+        ? '<span class="tag ok" title="请求转发到 ' + url +
+          '；未命中白名单的模型回落账号池">外部上游 ' + host + ' · 白名单 ' + wl + ' 项</span>'
+        : '<span class="tag warn" title="白名单留空 = 全部模型都转发到 ' + url +
+          '，不回落账号池。上游不可用（例如余额不足）时这个 key 会全部失败——' +
+          '把只走上游的模型名填进白名单，其余模型即可继续用账号池">外部上游 ' + host +
+          ' · <strong>全部模型</strong>（无兜底）</span>';
     } else {
       const cnt = channelMemberNames(bound).length;
       eff = cnt ? '<span class="tag ok">限 ' + esc(bound) + ' · ' + cnt + ' 个账号</span>'
