@@ -369,8 +369,8 @@ func FetchUpstreamModelIDs(base, key, label string, timeout time.Duration) ([]st
 //
 // 只列具体名字：通配条目（`*` / `glm-5*`）不是某个模型，客户端拿到也没法直接调；
 // 白名单写了 `*` 时用上游模型表把它展开成具体清单。
-func externalChannelModels(ch ChannelInfo) []map[string]any {
-	set := ChannelModelSet(ch)
+func externalChannelModels(ch ChannelInfo, poolBare []string) []map[string]any {
+	set := ChannelModelSet(ch, poolBare)
 	concrete := make([]string, 0, len(set))
 	hasStar := false
 	for _, m := range set {
@@ -388,6 +388,8 @@ func externalChannelModels(ch ChannelInfo) []map[string]any {
 		concrete = append(concrete, m)
 	}
 	if hasStar {
+		// `*` = 不限制，全部模型都走外部上游（含与池子同名的）——这是运维显式写下的
+		// 独占意图，所以这里用上游全表展开，不再排除池子已有的模型。
 		if ids, err := FetchUpstreamModelIDs(ch.UpstreamURL, ch.UpstreamKey, ch.Label, UpstreamModelTimeoutInline); err == nil {
 			concrete = append(concrete, ids...)
 		}

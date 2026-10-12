@@ -74,8 +74,12 @@ func FilterChannelModels(list []map[string]any, ch ChannelInfo) []map[string]any
 //
 // 留空且拉不到上游模型表时返回 nil（= 暂不承接任何模型）：请求安全回落账号池。
 // 上游不可达时宁可不用它，也不能把所有请求都往一个联系不上的上游上导。
-func ChannelModelSet(ch ChannelInfo) []string {
+// poolBare 是账号池目录里的**裸模型名**（剥掉 realm 前缀），用于自动模式下判断
+// "这个模型池子里是不是已经有了"。
+func ChannelModelSet(ch ChannelInfo, poolBare []string) []string {
 	if len(ch.Models) > 0 {
+		// 显式白名单：原样生效，**可以**覆盖池子里的同名模型
+		//（"我就要这个模型走外部上游"是合法意图，不该被拦）。
 		return ch.Models
 	}
 	if !ch.IsExternal() {
@@ -85,7 +89,25 @@ func ChannelModelSet(ch ChannelInfo) []string {
 	if err != nil || len(ids) == 0 {
 		return nil
 	}
-	return ids
+	// 自动模式：只接管**池子里没有的**上游模型（纯新增）。
+	//
+	// 为什么把重名的排除掉：绑定外部渠道的语义是"**增加**一组可用模型"，而不是
+	// "把原来好用的模型改道"。若把与池子同名的（glm-5.3-flash 这类）也收过来，
+	// 上游一旦欠费/宕机，这些本来正常工作的模型会跟着一起挂——实测踩过这个坑。
+	// 要让同名模型改走外部上游，就在白名单里显式写出来。
+	have := make(map[string]bool, len(poolBare))
+	for _, p := range poolBare {
+		if p = strings.TrimSpace(p); p != "" {
+			have[p] = true
+		}
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !have[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // ChannelServesModel 报告**外部上游渠道**是否承接这个模型（决定走上游还是回落账号池）。
@@ -97,11 +119,11 @@ func ChannelModelSet(ch ChannelInfo) []string {
 // 判定依据是 ChannelModelSet 解析出的渠道模型集，而不是白名单本身——留空时它等于
 // 上游模型表，所以"上游有的模型走上游、只有池子有的模型走池子"天然成立，
 // 且与 /v1/models 列出来的东西完全一致。
-func ChannelServesModel(ch ChannelInfo, bare string) bool {
+func ChannelServesModel(ch ChannelInfo, bare string, poolBare []string) bool {
 	if !ch.IsExternal() {
 		return false
 	}
-	set := ChannelModelSet(ch)
+	set := ChannelModelSet(ch, poolBare)
 	if len(set) == 0 {
 		return false
 	}

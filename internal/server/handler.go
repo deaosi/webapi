@@ -329,7 +329,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.ChannelOfKey != nil && keyID != "" {
 		if ch, bound := h.cfg.ChannelOfKey(keyID); bound && ch.IsExternal() {
 			list := h.modelList()
-			list = append(list, externalChannelModels(ch)...)
+			list = append(list, externalChannelModels(ch, h.poolModelNames())...)
 			writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
 			return
 		}
@@ -422,6 +422,22 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 // modelList 模型列表：CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel
 // 对称）；global.enabled=true 时追加 global: 前缀的国际版名单。
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
+// poolModelNames 账号池目录里的**裸模型名**（剥掉 realm 前缀）。
+//
+// 供渠道"自动发现上游模型"时判断某个上游模型池子里是不是已经有了——已有的不接管，
+// 避免绑定外部渠道把原来好用的同名模型改道走（上游欠费时会跟着一起挂）。
+// 底层 fetchDynamicModels() 自带缓存与失败负缓存，所以放在请求判定路径上是廉价的。
+func (h *Handler) poolModelNames() []string {
+	infos := h.fetchDynamicModels()
+	out := make([]string, 0, len(infos))
+	for _, mi := range infos {
+		if id := strings.TrimSpace(mi.ID); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
@@ -638,7 +654,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 概念（它的分组名在 pool.groups 里通常没有成员），设了会把回落请求
 			// 逼进一个空分组、直接 no_healthy_account。
 			if ch.IsExternal() {
-				if ChannelServesModel(ch, bareModel) {
+				if ChannelServesModel(ch, bareModel, h.poolModelNames()) {
 					proxyToUpstream(w, r, ch, body, bareModel)
 					return
 				}

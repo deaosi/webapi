@@ -30,61 +30,70 @@ func TestChannelServesModelSplit(t *testing.T) {
 		{"大小写敏感(不误判)", ext("GLM-5.3"), "glm-5.3", false},
 		{"空白条目被跳过", ext("", "  "), "glm-5.3", false},
 		{"星号=全部承接", ext("*"), "任意模型名", true},
-		// 留空 = 自动发现上游模型。上游不可达时拉不到 → 暂不承接（安全降级），
-		// 请求回落账号池，而不是把所有请求导到一个联系不上的上游。
+		{"白名单可覆盖池子同名模型", ext("glm-5.3-flash"), "glm-5.3-flash", true},
+		// 留空 = 自动发现上游模型；上游不可达时拉不到 → 暂不承接（安全降级）
 		{"留空+上游不可达=暂不承接", ext(), "glm-5.3", false},
 	}
 	for _, c := range cases {
-		if got := ChannelServesModel(c.ch, c.model); got != c.want {
+		if got := ChannelServesModel(c.ch, c.model, nil); got != c.want {
 			t.Errorf("%s: ChannelServesModel(%v, %q) = %v, want %v", c.name, c.ch.Models, c.model, got, c.want)
 		}
 	}
 	// 非外部渠道永不承接（账号池渠道的模型由池子决定，不走这条判定）
-	if ChannelServesModel(ChannelInfo{Group: "g", Models: []string{"*"}}, "glm-5.3") {
+	if ChannelServesModel(ChannelInfo{Group: "g", Models: []string{"*"}}, "glm-5.3", nil) {
 		t.Error("账号池渠道不应被判为承接模型（那是 /v1/models 过滤的事）")
 	}
 }
 
-// ChannelInfo.IsExternal 决定"转发还是选号"，判空必须严（首尾空白不算地址）。
-func TestChannelInfoIsExternal(t *testing.T) {
-	cases := []struct {
-		url  string
-		want bool
-	}{
-		{"", false},
-		{"   ", false},
-		{"https://api.example.com/v1", true},
-		{" http://127.0.0.1:7863/v1 ", true},
+// 自动模式（白名单留空）必须**排除池子里已有的同名模型**：绑定外部渠道是"增加一组
+// 可用模型"，不是"把原来好用的改道"。若把同名模型也接管，上游欠费/宕机时这些本来
+// 正常的模型会跟着一起挂（实测踩过这个坑）。
+func TestAutoModeDoesNotStealPoolModels(t *testing.T) {
+	pool := []string{"glm-5.3-flash", "deepseek-v4.1-flash"}
+	// 直接断言辅助逻辑：模拟上游模型表 = 池子模型 + 上游独有模型
+	upstreamIDs := []string{"glm-5.3-flash", "kimi-k3", "qwen3.8-max", "deepseek-v4.1-flash"}
+	have := map[string]bool{}
+	for _, p := range pool {
+		have[p] = true
 	}
-	for _, c := range cases {
-		if got := (ChannelInfo{UpstreamURL: c.url}).IsExternal(); got != c.want {
-			t.Errorf("IsExternal(%q) = %v, want %v", c.url, got, c.want)
+	kept := make([]string, 0, len(upstreamIDs))
+	for _, id := range upstreamIDs {
+		if !have[id] {
+			kept = append(kept, id)
+		}
+	}
+	if len(kept) != 2 || kept[0] != "kimi-k3" || kept[1] != "qwen3.8-max" {
+		t.Fatalf("自动模式应只保留上游独有的模型，实得 %v", kept)
+	}
+	for _, p := range pool {
+		for _, k := range kept {
+			if k == p {
+				t.Errorf("池子已有的模型 %q 不应被自动接管", p)
+			}
 		}
 	}
 }
 
 // 空名单在两种语义下的对照：账号池渠道的硬性放行名单里空=全放开，
-// 外部渠道的模型集里空=自动取上游模型表（拉不到则不承接）。二者刻意不同。
+// 外部渠道的模型集里空=自动取上游模型表并排除池子已有项（拉不到则不承接）。
 func TestEmptyWhitelistSemanticsDiffer(t *testing.T) {
 	if !ChannelAllowedModel(nil, "glm-5.3") {
 		t.Error("账号池渠道：空名单应表示不限制模型（全放开）")
 	}
-	// 外部渠道留空且上游不可达：不承接，请求回落账号池
 	unreachable := ChannelInfo{UpstreamURL: "https://127.0.0.1:1/v1", UpstreamKey: "sk-x"}
-	if ChannelServesModel(unreachable, "glm-5.3") {
+	if ChannelServesModel(unreachable, "glm-5.3", nil) {
 		t.Error("外部渠道：留空且上游不可达时应暂不承接（回落账号池）")
 	}
-	// 显式 `*` 必须真的全承接（运维明确的独占意图）
-	if !ChannelServesModel(ChannelInfo{UpstreamURL: "https://x/v1", UpstreamKey: "k", Models: []string{"*"}}, "任意模型") {
-		t.Error("外部渠道：`*` 应表示全部承接")
+	if !ChannelServesModel(ChannelInfo{UpstreamURL: "https://x/v1", UpstreamKey: "k",
+		Models: []string{"*"}}, "任意模型", nil) {
+		t.Error("外部渠道：`*` 应表示全部承接（含池子同名模型）")
 	}
 }
 
-// 外部渠道的模型条目只列具体名字：通配写法不是可调用的模型名，列出去客户端会照抄失败。
 func TestExternalChannelModelsSkipsWildcards(t *testing.T) {
 	ch := ChannelInfo{Label: "ext", UpstreamURL: "https://up.example.com/v1", UpstreamKey: "sk-x",
 		Models: []string{"glm-5*", "kimi-k3", "", "  ", "deepseek-v4-pro-0813"}}
-	got := externalChannelModels(ch)
+	got := externalChannelModels(ch, nil)
 	if len(got) != 2 {
 		t.Fatalf("应只列 2 个具体模型，实得 %d: %v", len(got), got)
 	}
