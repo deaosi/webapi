@@ -62,6 +62,11 @@ type Config struct {
 	// 由 main 注入——它持有 channels 配置与上游密钥，面板包不反向依赖 cmd/server。
 	FetchUpstreamModels func(channel string) ([]string, error)
 
+	// TestUpstream 对某渠道的上游做一次最小探测，返回上游的原始状态码与响应体
+	// （渠道页"测试上游"按钮用）。余额不足/密钥无效/地址写错这类问题只能从上游
+	// 原话里看出来，网关不缓存也不翻译。nil 时端点返回 501。
+	TestUpstream func(channel string) map[string]any
+
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
@@ -191,6 +196,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/pick/stats/reset", p.withAuth(p.resetPickStats))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("POST /panel/api/channels/upstream_models", p.withAuth(p.channelUpstreamModels))
+	p.mux.HandleFunc("POST /panel/api/channels/test_upstream", p.withAuth(p.channelTestUpstream))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	p.mux.HandleFunc("GET /panel/api/api_keys", p.withAuth(p.listAPIKeys))

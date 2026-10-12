@@ -315,6 +315,35 @@ func main() {
 			}
 			return server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label)
 		},
+		// 渠道页"测试上游"：真实发一条最小请求，把上游的原始状态码与响应体带回面板。
+		// 余额不足(402)/密钥无效(401)/路径写错(404) 这类问题只能从上游原话里看出来，
+		// 否则运维只能靠发真实业务请求去撞，撞到的 402 还会被客户端当自身故障。
+		TestUpstream: func(name string) map[string]any {
+			def, ok := chRouter.defByName(name)
+			if !ok {
+				return map[string]any{"ok": false, "error": fmt.Sprintf("渠道 %q 不存在（可能刚被删除，刷新后重试）", name)}
+			}
+			if !def.IsExternal() {
+				return map[string]any{"ok": false, "error": fmt.Sprintf("渠道 %q 不是外部上游渠道（未填请求地址）", name)}
+			}
+			// 探测模型：优先用白名单里第一个具体模型；白名单为空或全是通配时，
+			// 拉上游模型表取第一个——没有模型名就无法构造一次合法探测。
+			model := ""
+			for _, m := range def.Models {
+				if m = strings.TrimSpace(m); m != "" && !strings.HasSuffix(m, "*") {
+					model = m
+					break
+				}
+			}
+			if model == "" {
+				if ids, err := server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label); err == nil && len(ids) > 0 {
+					model = ids[0]
+				} else if err != nil {
+					return map[string]any{"ok": false, "error": "无法确定探测模型（拉取上游模型失败：" + err.Error() + "）"}
+				}
+			}
+			return server.ProbeUpstream(def.UpstreamURL, def.UpstreamKey, model)
+		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。

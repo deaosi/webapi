@@ -46,3 +46,37 @@ func (p *Panel) channelUpstreamModels(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"channel": name, "models": models})
 }
+
+// channelTestUpstream 处理 POST /panel/api/channels/test_upstream。
+//
+// 请求体 {"channel": "<渠道名>"}；响应 = 上游探测结果（ok/status/elapsed/model/body）。
+// 与拉取模型同一个安全口径：只按渠道名间接取地址与密钥，请求体里的 URL/key 一律不采信。
+//
+// 响应一律 200（探测本身失败也是"成功的探测"）：运维要看的是上游回了什么，
+// 而不是网关把上游的 402 又包成了一个 502。
+func (p *Panel) channelTestUpstream(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.TestUpstream == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{
+			"error": "当前进程未启用上游探测",
+		})
+		return
+	}
+	var req struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return
+	}
+	name := strings.TrimSpace(req.Channel)
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "channel 不能为空"})
+		return
+	}
+	res := p.cfg.TestUpstream(name)
+	if res == nil {
+		res = map[string]any{"ok": false, "error": "探测未返回结果"}
+	}
+	res["channel"] = name
+	writeJSON(w, http.StatusOK, res)
+}

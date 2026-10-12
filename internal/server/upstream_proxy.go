@@ -80,7 +80,7 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, ch ChannelInfo, raw
 	if err != nil {
 		// 上游不可达：与账号池链路的"换号重试"不同，外部渠道只有一个上游，
 		// 重试只会放大上游压力；直接 502 并保留原因供排障。
-		log.Printf("WARN: [server] upstream channel %q -> %s: %v", ch.Label, target, err)
+		log.Printf("WARN: [server] upstream channel %q -> %s: %v", ch.logName(), target, err)
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_unavailable",
 			"upstream channel request failed: "+err.Error())
 		return
@@ -100,7 +100,7 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, ch ChannelInfo, raw
 	// （拼出来成了 "<host>/chat/completions"，上游自然 404）。
 	if resp.StatusCode == http.StatusNotFound {
 		log.Printf("WARN: [server] upstream channel %q 404：请检查 upstream_url 是否含 /v1 前缀（当前 %q → %s）",
-			ch.Label, base, target)
+			ch.logName(), base, target)
 	}
 	w.WriteHeader(resp.StatusCode)
 
@@ -118,7 +118,7 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, ch ChannelInfo, raw
 			}
 			if err != nil {
 				if err != io.EOF {
-					log.Printf("WARN: [server] upstream stream %q: %v", ch.Label, err)
+					log.Printf("WARN: [server] upstream stream %q: %v", ch.logName(), err)
 				}
 				return
 			}
@@ -126,13 +126,80 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, ch ChannelInfo, raw
 	}
 	_, _ = io.Copy(w, resp.Body)
 	log.Printf("[server] upstream channel=%q model=%s status=%d %s",
-		ch.Label, bareModel, resp.StatusCode, time.Since(start).Round(time.Millisecond))
+		ch.logName(), bareModel, resp.StatusCode, time.Since(start).Round(time.Millisecond))
+}
+
+// logName 日志里标识渠道的名字：优先展示名，回退到分组名（渠道标识）。
+//
+// 只在 Label 非空时用 Label 会打出 channel=""——排查时看不出是哪个渠道，
+// 而 Group（渠道标识）在配置里必然有值，是最可靠的兜底。
+func (c ChannelInfo) logName() string {
+	if strings.TrimSpace(c.Label) != "" {
+		return c.Label
+	}
+	if strings.TrimSpace(c.Group) != "" {
+		return c.Group
+	}
+	return "(unnamed)"
 }
 
 // isStreamResponse 判断上游响应是否按流式处理（SSE 或 ndjson）。
 func isStreamResponse(ct string) bool {
 	ct = strings.ToLower(ct)
 	return strings.Contains(ct, "text/event-stream") || strings.Contains(ct, "application/x-ndjson")
+}
+
+// ProbeUpstream 对上游做一次最小可用性探测（真实发一条 1-token chat），
+// 把上游的**原始状态码与响应体**带回来。
+//
+// 为什么要有它：上游余额/配额这类信息不在本网关掌控内，也不该由网关缓存或编造。
+// 但运维在"渠道能不能用、要不要充值"这件事上，现在只能靠发真实业务请求去撞——
+// 撞到的 402 还会被客户端当成自身故障。给面板一个显式探测入口，让上游的原话
+//（如 `{"code":"INSUFFICIENT_BALANCE","message":"余额不足"}`）直接显示在配置页。
+//
+// 探测请求刻意最小（max_tokens=1、单轮）：目的是拿状态码而不是拿内容，
+// 即使上游计费也不会造成可观消耗。
+func ProbeUpstream(base, key, model string) map[string]any {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return map[string]any{"ok": false, "error": "渠道未配置请求地址"}
+	}
+	if strings.TrimSpace(model) == "" {
+		return map[string]any{"ok": false, "error": "渠道未配置模型，无法探测（先拉取上游模型并选一个）"}
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"model":      model,
+		"stream":     false,
+		"max_tokens": 1,
+		"messages":   []map[string]any{{"role": "user", "content": "ping"}},
+	})
+	req, err := http.NewRequest(http.MethodPost, base+"/chat/completions", bytes.NewReader(payload))
+	if err != nil {
+		return map[string]any{"ok": false, "error": err.Error()}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+
+	start := time.Now()
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	elapsed := time.Since(start).Round(time.Millisecond).String()
+	if err != nil {
+		return map[string]any{"ok": false, "elapsed": elapsed, "error": "上游不可达：" + err.Error()}
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+
+	res := map[string]any{
+		"ok":      resp.StatusCode >= 200 && resp.StatusCode < 300,
+		"status":  resp.StatusCode,
+		"elapsed": elapsed,
+		"model":   model,
+		// 上游原话照带：402 的"余额不足"、401 的密钥无效、404 的路径写错，
+		// 都比网关翻译过的措辞更能直接指向要改的地方。
+		"body": strings.TrimSpace(string(body)),
+	}
+	return res
 }
 
 // ── 上游模型表（带缓存）──

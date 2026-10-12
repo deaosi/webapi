@@ -2813,6 +2813,7 @@ function chEditModal(mode, name) {
   $('chEditUpstreamKey').placeholder = isExt ? '已保存，留空表示不修改' : 'sk-...';
   $('chEditUpstreamType').value = (row && row.upstream_type) || 'openai';
   chEditClearFetched();
+  chEditClearTest();
   chEditToggleKind();
   // 路由属性（优先级/权重）在 pool.groups，渠道弹窗里一并可改。
   const route = (mode === 'edit' && chState.route[name]) || {};
@@ -2859,6 +2860,15 @@ function chEditClearFetched() {
   if (note) note.textContent = '从上游 /models 拉当前可用模型（点一个加入白名单）';
 }
 
+// chEditClearTest 清掉上一次的探测结果：换渠道/重开弹窗时留着旧的 402 或 200
+// 会让人以为是这次的结论。
+function chEditClearTest() {
+  const out = $('chEditTestOut');
+  if (out) { out.hidden = true; out.textContent = ''; out.className = 'ch-test-out'; }
+  const note = $('chEditTestNote');
+  if (note) note.textContent = '真实发一条最小请求，把上游原话显示出来（余额不足 / 密钥无效 / 地址写错都能看出来）';
+}
+
 function chEditModelTokens() {
   return String(($('chEditModels') || {}).value || '')
     .split(',').map(x => x.trim()).filter(Boolean);
@@ -2879,6 +2889,48 @@ function chEditToggleFetched(id) {
   if (i >= 0) cur.splice(i, 1); else cur.push(id);
   $('chEditModels').value = cur.join(', ');
   chEditRenderFetched(Array.from($('chEditFetchList').children).map(el => el.dataset.m));
+}
+
+// chEditTestUpstream 真实探一次上游，把原始状态码与响应体贴到面板上。
+//
+// 存在理由：上游余额不足(402)/密钥无效(401)/地址写错(404) 这些信息只在上游自己的
+// 响应里，网关既不缓存也不翻译。没有这个按钮，运维只能发真实业务请求去撞，而撞到的
+// 402 还会被当成自己的故障去查。结果区刻意直接贴**原始 JSON**（不做措辞美化），
+// 因为"余额不足"这四个字比网关转述的任何说法都更能直接指向要去做的事。
+async function chEditTestUpstream() {
+  const btn = $('chEditTestBtn');
+  const note = $('chEditTestNote');
+  const out = $('chEditTestOut');
+  const isCreate = !$('chEditName').disabled;
+  if (isCreate) {
+    note.textContent = '请先保存该渠道，之后在「编辑」里测试上游';
+    return;
+  }
+  btn.disabled = true; const oldTxt = btn.textContent; btn.textContent = '测试中…';
+  note.textContent = '正在请求上游…';
+  out.hidden = true; out.textContent = ''; out.className = 'ch-test-out';
+  try {
+    const r = await api('channels/test_upstream', {
+      method: 'POST', body: JSON.stringify({ channel: chEditState.name }),
+    });
+    if (r && r.ok) {
+      note.textContent = '上游可用（HTTP ' + r.status + ' · ' + (r.elapsed || '?') + ' · 探测模型 ' + (r.model || '?') + '）';
+      out.className = 'ch-test-out ok';
+      out.textContent = r.body || '(空响应体)';
+    } else {
+      note.textContent = (r && r.status)
+        ? '上游返回 HTTP ' + r.status + '（' + (r.elapsed || '?') + '）'
+        : '探测失败';
+      out.className = 'ch-test-out bad';
+      out.textContent = (r && r.body) ? r.body : ((r && r.error) || '未知错误');
+    }
+    out.hidden = false;
+  } catch (e) {
+    note.textContent = '探测失败：' + e.message;
+    out.className = 'ch-test-out bad';
+    out.textContent = e.message;
+    out.hidden = false;
+  } finally { btn.disabled = false; btn.textContent = oldTxt; }
 }
 
 async function chEditFetchModels() {
@@ -3101,6 +3153,7 @@ document.addEventListener('click', ev => {
   if (act === 'ch-del') { chDelete(b.dataset.g); return; }
   if (act === 'key-bind') { keyBindModal(b.dataset.id); return; }
   if (act === 'chfetch-models') { chEditFetchModels(); return; }
+  if (act === 'chtest-upstream') { chEditTestUpstream(); return; }
   if (act === 'chfetch-toggle') { chEditToggleFetched(b.dataset.m); return; }
   if (act === 'chedit-save') { chEditSubmit(); return; }
   if (act === 'chedit-cancel') { closeChEditModal(); return; }
