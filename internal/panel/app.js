@@ -14,6 +14,9 @@ const apiKeyState = {
 // chState 渠道页状态：声明显式提前到顶层 go() 之前（const TDZ——开局 hash 如果是
 // #channels，顶层 go() 在文件求值中途就会调 loadChannels，滞后声明直接炸）。
 const chState = { defs: {}, keys: {}, enabled: true, keyList: [], members: {}, route: {}, dirty: false, loaded: false };
+// zenState 同理提前：zen 视图是面板内的一等视图，开局 hash 就是 #zen 时顶层 go()
+// 会立刻调 loadZen，声明放文件后半段会炸 TDZ。
+const zenState = { loaded: false, busy: false, data: null };
 
 const $ = id => document.getElementById(id);
 
@@ -181,7 +184,7 @@ $('btnKey').onclick = async () => {
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', apikeys: 'API 密钥', channels: '上游渠道', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', apikeys: 'API 密钥', channels: '上游渠道', zen: 'Zen 通道', config: '配置', logs: '运行日志' };
 function go(v) {
   if (v !== 'apikeys' && apiKeyState.modalOpen) closeAPIKeyModal(false);
   view = v;
@@ -191,28 +194,161 @@ function go(v) {
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'apikeys') loadAPIKeys();
   if (v === 'channels') loadChannels();
+  if (v === 'zen') loadZen();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   if (v === 'taskscenter') reattachQueueView();
 }
-document.querySelectorAll('.nav a').forEach(a => {
-  // zen 侧车是**另一个应用**（自带后台页 /zen/panel、自己的鉴权与 localStorage key），
-  // 不能走 go() 切视图——没有对应 section，会把页面切成空白。
-  // 这里只做一件事：把当前密钥预写进它用的 localStorage 键，跳过去就免再输一遍。
-  // 同源页面之间写同源 localStorage，不产生任何新的暴露面（密钥本就在本页 localStorage 里）。
-  if (a.dataset.view === 'zen') {
-    a.onclick = () => {
-      const k = localStorage.getItem(LS_KEY);
-      if (k) { try { localStorage.setItem('zen_gateway_key', k); } catch (err) { /* 隐私模式等：忽略，那边手输即可 */ } }
-      // 刻意不 preventDefault：交给浏览器按 target="_blank" 打开（中键/Ctrl 点击同样有效）。
-    };
-    return;
-  }
-  a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); };
-});
+document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accounts').slice(1) : 'accounts');
+
+/* ── Zen 通道（旁路网关 · OpenCode Zen 免费通道）─────────────────────
+   数据来自 zen 侧车的同源接口 /zen/panel/api/overview。做成面板内的一等视图，
+   而不是跳到 zen 自己的页面：切页零刷新、复用同一把密钥（zen 也认面板密钥），
+   "返回"就是点左侧导航——不存在重新加载与重新登录带来的卡顿。
+   字段名与 zen 的 panel.mjs 一致（by_model[id].{ok,fail,prompt,completion}、
+   breaker[id].{cooldown_ms,streak}、inflight.perModel[id].{inflight,queued}）。 */
+function zenErr(msg) {
+  const el = $('zenError');
+  el.textContent = msg; el.hidden = !msg;
+}
+// zenApi 走 zen 自己的前缀（面板的 api() 固定拼 /panel/api/，这里不能复用）。
+async function zenApi(path, opts = {}) {
+  const h = Object.assign({}, opts.headers || {});
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  if (opts.body) h['Content-Type'] = 'application/json';
+  const r = await fetch('/zen/panel/api/' + path, Object.assign({}, opts, { headers: h }));
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((d.error && d.error.message) || ('HTTP ' + r.status));
+  return d;
+}
+function zenNum(n) { return Number(n || 0).toLocaleString('en-US'); }
+function zenCtx(n) {
+  n = Number(n || 0);
+  if (!n) return '—';
+  if (n >= 1048576) return (n / 1048576) + 'M';
+  if (n >= 1000) return Math.round(n / 1000) + 'k';
+  return String(n);
+}
+function zenDur(s) {
+  s = Number(s || 0);
+  if (s >= 86400) return Math.floor(s / 86400) + '天' + Math.floor((s % 86400) / 3600) + '时';
+  if (s >= 3600) return Math.floor(s / 3600) + '时' + Math.floor((s % 3600) / 60) + '分';
+  if (s >= 60) return Math.floor(s / 60) + '分' + (s % 60) + '秒';
+  return s + '秒';
+}
+function zenTile(k, v, cls) {
+  return '<div class="stat ' + (cls || '') + '"><div class="v">' + v + '</div><div class="k">' + esc(k) + '</div></div>';
+}
+async function loadZen(force) {
+  if (zenState.busy) return;
+  zenState.busy = true;
+  zenErr('');
+  try {
+    const d = await zenApi('overview');
+    zenState.data = d; zenState.loaded = true;
+    renderZen();
+  } catch (e) {
+    // zen 挂掉不该让整页看起来坏了：给一处明确的原因 + 一个重试按钮。
+    zenState.loaded = false; zenState.data = null;
+    $('zenNote').textContent = '不可达';
+    $('zenStats').innerHTML = '';
+    ['zenLane', 'zenUp', 'zenConc'].forEach(function (id) { $(id).textContent = '—'; });
+    $('zenModels').innerHTML = '<tr><td colspan="8"><div class="empty">zen 侧车不可达</div></td></tr>';
+    zenErr('读取 zen 侧车失败：' + e.message + '（确认 zen-gateway 服务在运行）');
+  } finally { zenState.busy = false; }
+}
+function renderZen() {
+  const d = zenState.data;
+  if (!d) return;
+  const gw = d.gateway || {}, z = d.zen || {}, st = d.stats || {};
+  const lim = z.limits || {}, bym = st.by_model || {}, bk = z.breaker || {};
+  const infl = (d.inflight && d.inflight.perModel) || {};
+  const g = (d.inflight && d.inflight.global) || { inflight: 0, queued: 0 };
+  const pan = d.panel || {};
+  const auth = d.auth || {};
+
+  $('zenNote').textContent = '已运行 ' + zenDur(gw.uptime_s) + ' · 本次鉴权 ' + (auth.tier || '-');
+  $('zenStats').innerHTML =
+    zenTile('请求总数', zenNum(gw.requests)) +
+    zenTile('zen 成功', zenNum(st.zen_ok), st.zen_ok ? 'good' : '') +
+    zenTile('zen 失败', zenNum(st.zen_fail), st.zen_fail ? 'bad' : '') +
+    zenTile('面板成功', zenNum(st.wb2api_ok)) +
+    zenTile('面板失败', zenNum(st.wb2api_fail), st.wb2api_fail ? 'bad' : '') +
+    zenTile('放行密钥', zenNum(auth.keys_accepted));
+
+  const notReady = z.status && z.status !== 'ready';
+  $('zenLane').innerHTML =
+    '状态 ' + (notReady ? '<span class="tag warn">' + esc(z.status) + '</span>'
+                       : '<span class="tag ok">' + esc(z.status || 'ready') + '</span>') +
+    ' · 在售 ' + zenNum(z.total) + ' · 免费放出 ' + zenNum(z.exposed) +
+    '<br>上次刷新 ' + esc((z.lastRefresh || '-').replace('T', ' ').replace('Z', ' UTC')) +
+    (z.lastError ? '<br><span class="tag bad">' + esc(z.lastError) + '</span>' : '');
+
+  $('zenUp').innerHTML = esc(pan.base || '—') + ' · 模型 ' + zenNum(pan.models) +
+    '<br>' + (pan.error ? '<span class="tag bad">' + esc(pan.error) + '</span>'
+                        : '<span class="tag ok">正常</span>') +
+    (pan.cached_age_ms != null ? ' · 目录缓存 ' + Math.round(pan.cached_age_ms / 1000) + 's 前' : '');
+
+  $('zenConc').textContent = '全局在途 ' + g.inflight + '（排队 ' + g.queued + '）';
+
+  const ids = (z.models || []).slice().sort();
+  $('zenModelsNote').textContent = ids.length
+    ? '共 ' + ids.length + ' 个免费模型，用 zen:<模型名> 调用'
+    : '目录尚未就绪';
+  $('zenModels').innerHTML = ids.length ? ids.map(function (id) {
+    const l = lim[id] || {};
+    const s = bym[id] || { ok: 0, fail: 0, prompt: 0, completion: 0 };
+    const b = bk[id];
+    const inf = infl[id];
+    const state = b
+      ? '<span class="tag warn">冷却 ' + Math.ceil(b.cooldown_ms / 1000) + 's</span>'
+      : '<span class="tag ok">正常</span>';
+    const failCls = s.fail ? ' style="color:var(--bad)"' : '';
+    return '<tr title="调用名：zen:' + esc(id) + '">' +
+      '<td class="who"><div class="nm">zen:' + esc(id) + '</div></td>' +
+      '<td class="num">' + zenCtx(l.contextWindow) + '</td>' +
+      '<td class="num">' + zenCtx(l.maxOutput) + '</td>' +
+      '<td class="num"' + failCls + '>' + zenNum(s.ok) + ' / ' + zenNum(s.fail) + '</td>' +
+      '<td class="num">' + zenNum(s.prompt) + ' / ' + zenNum(s.completion) + '</td>' +
+      '<td class="num">' + (inf ? (inf.inflight + ' / ' + inf.queued) : '—') + '</td>' +
+      '<td>' + state + '</td>' +
+      '<td class="c-acts">' + (b ? '<button class="xs ghost" data-act="zen-unblock" data-m="' + esc(id) + '">解除</button>' : '') + '</td></tr>';
+  }).join('') : '<tr><td colspan="8"><div class="empty">暂无模型（目录尚未就绪，可点「刷新目录」）</div></td></tr>';
+}
+$('btnZenReload').onclick = () => loadZen(true);
+$('btnZenCatalog').onclick = async () => {
+  const b = $('btnZenCatalog');
+  b.disabled = true; const old = b.textContent; b.textContent = '刷新中…';
+  try {
+    await zenApi('catalog/refresh', { method: 'POST' });
+    toast('已让 zen 重新拉取免费模型目录', 'ok');
+    await loadZen(true);
+  } catch (e) { zenErr('刷新目录失败：' + e.message); toast('刷新目录失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = old; }
+};
+$('btnZenUnblock').onclick = async () => {
+  const b = $('btnZenUnblock');
+  b.disabled = true; const old = b.textContent; b.textContent = '处理中…';
+  try {
+    await zenApi('breaker/clear', { method: 'POST', body: '{}' });
+    toast('已解除 zen 侧全部模型冷却', 'ok');
+    await loadZen(true);
+  } catch (e) { zenErr('解除冷却失败：' + e.message); toast('解除冷却失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = old; }
+};
+// 逐模型解除冷却：与 zen 自己页面同一接口（breaker/clear 带 model）。
+document.addEventListener('click', ev => {
+  const el = ev.target.closest && ev.target.closest('[data-act="zen-unblock"]');
+  if (!el || el.disabled) return;
+  const m = el.dataset.m;
+  zenApi('breaker/clear', { method: 'POST', body: JSON.stringify({ model: m }) })
+    .then(() => { toast('已解除 zen:' + m + ' 的冷却', 'ok'); return loadZen(true); })
+    .catch(e => { zenErr('解除失败：' + e.message); toast('解除失败：' + e.message, 'err'); });
+});
 
 /* ── API 调用密钥 ─────────────────────────────────────────────────── */
 function apiEndpoints(origin) {

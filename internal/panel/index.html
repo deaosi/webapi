@@ -56,9 +56,6 @@ body {
   color: var(--ink-2); text-decoration: none; border-radius: 7px; font-size: 13.5px;
 }
 .nav a:hover { background: var(--surface-2); color: var(--ink); }
-/* 跳到 zen 侧车后台的外链项：右上角 ↗ 标记它不在本面板内切换视图 */
-.nav a.ext-link .ext-mark { font-style: normal; font-size: 10px; opacity: .5; margin-left: 3px; }
-.nav a.ext-link:hover .ext-mark { opacity: 1; }
 .nav a.on { background: var(--accent-soft); color: var(--accent); font-weight: 550; }
 .nav a svg { width: 15px; height: 15px; flex: none; opacity: .85; }
 .nav .sig { padding: 12px 16px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--ink-3); }
@@ -533,10 +530,10 @@ select.grp-sel { max-width: 130px; }
       <li><a href="#channels" data-view="channels">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4.2h12M2 8h12M2 11.8h12"/><circle cx="5" cy="4.2" r="1.6"/><circle cx="10.5" cy="11.8" r="1.6"/></svg>
         上游渠道</a></li>
-      <li><a href="/zen/panel" target="_blank" rel="noopener" data-view="zen" class="ext-link"
-        title="zen 侧车（旁路网关）自己的管理页：zen 免费模型目录 / 冷却解除 / 转发与并发统计">
+      <li><a href="#zen" data-view="zen"
+        title="OpenCode Zen 免费通道：模型目录 / 冷却 / 转发与并发统计">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.3 8h3.4"/><path d="M5.7 8 9 4.6h4.4"/><path d="M5.7 8 9 11.4h4.4"/></svg>
-        Zen 通道<i class="ext-mark">↗</i></a></li>
+        Zen 通道</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
@@ -1078,6 +1075,37 @@ select.grp-sel { max-width: 130px; }
         </footer>
       </div>
     </div>
+
+    <!-- Zen 通道（旁路网关，OpenCode Zen 免费通道） -->
+    <section class="view" id="view-zen" hidden>
+      <div class="stats" id="zenStats"></div>
+      <div class="box">
+        <header>
+          <h3>Zen 通道 <span class="hint" id="zenNote">旁路网关 · 直接读同源 JSON，无需跳页</span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnZenReload">刷新</button>
+          <button class="xs" id="btnZenCatalog" title="让 zen 立即重新拉一次免费模型目录">刷新目录</button>
+          <button class="xs" id="btnZenUnblock" title="清掉 zen 侧全部模型冷却">解除全部冷却</button>
+        </header>
+        <div class="pad">
+          <div class="grid3">
+            <div class="fld"><span class="lb">Zen 免费通道</span><div id="zenLane" class="note">—</div></div>
+            <div class="fld"><span class="lb">上游面板</span><div id="zenUp" class="note">—</div></div>
+            <div class="fld"><span class="lb">并发</span><div id="zenConc" class="note">—</div></div>
+          </div>
+          <div class="hr"></div>
+          <h4 class="sub-h">模型目录 <span class="hint" id="zenModelsNote">用 zen:&lt;模型名&gt; 调用</span></h4>
+          <div class="tbl-wrap"><table class="acc">
+            <thead><tr><th>模型</th><th>上下文</th><th>输出上限</th><th>成功 / 失败</th><th>token 入 / 出</th><th>并发</th><th>状态</th><th class="c-acts"></th></tr></thead>
+            <tbody id="zenModels"></tbody>
+          </table></div>
+          <p class="ak-note">这一页读的是 zen 侧车的同源接口 <code>/zen/panel/api/overview</code>（同一把密钥，zen 也认），
+            所以进来出去都是面板内切页、不重新加载、不用再登录。
+            需要 zen 原始页面的其余功能可以走<a href="/zen/panel" rel="noopener">独立页面</a>。</p>
+          <div class="ak-error" id="zenError" role="status" hidden></div>
+        </div>
+      </div>
+    </section>
 
     <!-- 配置 -->
     <section class="view" id="view-config" hidden>
