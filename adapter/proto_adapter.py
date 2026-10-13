@@ -1228,22 +1228,29 @@ def _caller_key(headers):
 def panel_accepts_key(key):
     """问 panel 这个调用密钥是否有效。
 
-    panel 不可达/超时 -> False（让请求走正常 401，不把 panel 抖动变成放行）。
-    TTL 内命中缓存则零额外请求。
+    只有 panel **明确表态**时才缓存判定：200 = 有效，401/403 = 确实无效。
+    连不上 / 超时 / 5xx 属于"问不出来"——把它们也缓存成 False，会把一次 panel 重启
+    或抖动放大成 TTL 之内的持续 401（用户看到的就是"合法密钥突然无效"）。
+    这类结果本次仍拒绝（fail closed，不放过未验证的密钥），但**不写缓存**，
+    panel 一恢复，下一个请求立刻重新验证通过。
     """
     now_t = time.time()
     hit = _KEY_VERDICTS.get(key)
     if hit and now_t - hit[1] < _KEY_VERDICT_TTL:
         return hit[0]
     ok = False
+    definitive = False
     try:
         st, _, _ = panel_get("/v1/models", {"Authorization": "Bearer " + key}, timeout=8)
         ok = st == 200
+        definitive = ok or st in (401, 403)
     except Exception:
         ok = False
-    if len(_KEY_VERDICTS) > _KEY_VERDICT_MAX:
-        _KEY_VERDICTS.clear()
-    _KEY_VERDICTS[key] = (ok, now_t)
+        definitive = False
+    if definitive:
+        if len(_KEY_VERDICTS) > _KEY_VERDICT_MAX:
+            _KEY_VERDICTS.clear()
+        _KEY_VERDICTS[key] = (ok, now_t)
     return ok
 
 
