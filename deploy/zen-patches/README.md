@@ -64,10 +64,57 @@ if (cfg.wb2api.api_key) headers.authorization = `Bearer ${cfg.wb2api.api_key}`;
 日志: [server] upstream channel="channel1" model=kimi-k3 status=200
 ```
 
+## 4. `ZEN-OWN-KEY v1` — 用你自己的 OpenCode Console API key（**官方支持的用法**）
+
+脚本：`04-own-api-key.py`（独立、幂等；`apply.py` 覆盖上面 1-3）。
+
+**为什么加这个**：OpenCode 把**免费额度**锁在它自己的客户端里了，于是匿名 `public` 通道
+（`disguise.mjs` 伪造 `user-agent: opencode/1.18.31` + `x-opencode-client: cli` + canonical
+session id 那一套）整体失效，所有 `zen:*` 一律返回：
+
+```
+403 {"type":"error","error":{"type":"FreeTierError",
+     "message":"OpenCode's free tier can only be used from within OpenCode..."}}
+```
+
+实测 chat 端点在没有有效凭据时，**无论带什么 key / 伪装头，返回的都是同一段 403**
+（无 auth、`Bearer public`、假 key、假 key+伪装头、`x-api-key` —— 五种组合完全一致）；
+对照 `GET /v1/models` 带假 key 会返回 `401 Invalid credential`，说明鉴权层本身能区分。
+也就是说：**没有有效凭据 → 落回免费通道 → 被客户端限制拦住；有有效凭据 → 走付费通道，
+不受这条限制。**
+
+而官方文档（`https://opencode.ai/docs/zen/`）明确写着这套 API key 可以
+"use them with OpenCode **or another coding agent**"，页面还有 `Add $20 Pay as you go
+balance` 与 pay-as-you-go 定价。**所以"接到自建网关里"是官方允许的用法。**
+
+**改动**：
+- `disguise.mjs`：`disguiseHeaders(ids, realKey)`。`realKey` 非空时只发
+  `authorization` / `accept` / `content-type` 三个头，**不再发任何伪装头**——
+  用真凭据就是正常调用，伪造客户端身份既没必要也不该做。
+- `server.mjs`：默认值加 `zen.api_key: ''`，两处调用点传 `cfg.zen.api_key`。
+
+**没配 key 时行为与之前完全一致**（已验证：仍是同一个 403）。
+
+**启用**（拿到 key 之后）：
+
+```bash
+sudo python3 - <<'EOF'
+import json
+p = "/etc/zen-gateway/config.json"
+c = json.load(open(p))
+c.setdefault("zen", {})["api_key"] = "你的 OpenCode Console API key"
+json.dump(c, open(p, "w"), ensure_ascii=False, indent=2)
+EOF
+sudo systemctl restart zen-gateway
+```
+
+**没有 key 时不要继续加固伪装那一套**：那是绕对方的免费额度限制，不在本仓库支持的范围内。
+
 ## 注意
 
 第 3 条**不是**绕过任何上游限制，纯粹是把调用者身份如实传给面板，让面板的既有功能
 （按 key 绑定渠道、按 key 统计用量）真正生效。
 
-第 2 条与之相反：它是**停止宣称**一个被上游限制掉的免费通道；这套伪装成 OpenCode 客户端
-的逻辑（`src/disguise.mjs`）本身是上游明令限制的行为，不要在此基础上继续加固。
+第 2 条与之相反：它是**停止宣称**一个被上游限制掉的免费通道；那套伪装成 OpenCode 客户端的
+逻辑（`src/disguise.mjs`）本身是上游明令限制的行为。第 4 条给出了正路：用你自己的凭据，
+并**去掉**伪装。
