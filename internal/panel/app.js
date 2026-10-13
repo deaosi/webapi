@@ -197,7 +197,21 @@ function go(v) {
   if (v === 'packages') loadPackages();
   if (v === 'taskscenter') reattachQueueView();
 }
-document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
+document.querySelectorAll('.nav a').forEach(a => {
+  // zen 侧车是**另一个应用**（自带后台页 /zen/panel、自己的鉴权与 localStorage key），
+  // 不能走 go() 切视图——没有对应 section，会把页面切成空白。
+  // 这里只做一件事：把当前密钥预写进它用的 localStorage 键，跳过去就免再输一遍。
+  // 同源页面之间写同源 localStorage，不产生任何新的暴露面（密钥本就在本页 localStorage 里）。
+  if (a.dataset.view === 'zen') {
+    a.onclick = () => {
+      const k = localStorage.getItem(LS_KEY);
+      if (k) { try { localStorage.setItem('zen_gateway_key', k); } catch (err) { /* 隐私模式等：忽略，那边手输即可 */ } }
+      // 刻意不 preventDefault：交给浏览器按 target="_blank" 打开（中键/Ctrl 点击同样有效）。
+    };
+    return;
+  }
+  a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); };
+});
 go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accounts').slice(1) : 'accounts');
 
 /* ── API 调用密钥 ─────────────────────────────────────────────────── */
