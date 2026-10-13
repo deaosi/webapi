@@ -2,6 +2,7 @@ package server
 
 import (
 	"testing"
+	"time"
 )
 
 // 外部渠道的模型分流：命中渠道模型集走上游，未命中回落账号池。
@@ -109,5 +110,36 @@ func TestExternalChannelModelsSkipsWildcards(t *testing.T) {
 	}
 	if ids["glm-5*"] {
 		t.Error("通配条目不应进模型列表")
+	}
+}
+
+// 回归：上游模型表拉取失败时，**已经发现过的模型不能消失**。
+//
+// 早先的实现把失败条目写成 upstreamModelEntry{at:..., failed:true}（ids 零值），
+// 一次拉取失败就把整张表抹掉 → 白名单留空的渠道瞬间"没有任何模型" → 只有外部上游
+// 才有的模型集体掉回账号池报 no_healthy_account。这个测试锁住"旧值必须留存"。
+func TestUpstreamModelCacheKeepsLastGoodOnFailure(t *testing.T) {
+	const ck = "test-key-keep-last-good"
+
+	// 先放一份"上次成功"的结果
+	upstreamModelMu.Lock()
+	upstreamModelCache[ck] = upstreamModelEntry{ids: []string{"kimi-k3", "qwen3.8-max"}, at: time.Now()}
+	upstreamModelMu.Unlock()
+
+	// 失败路径：模拟 rememberFail 的语义（保留 prev.ids）
+	upstreamModelMu.Lock()
+	prev := upstreamModelCache[ck]
+	upstreamModelCache[ck] = upstreamModelEntry{ids: prev.ids, at: time.Now(), failed: true}
+	got := upstreamModelCache[ck]
+	upstreamModelMu.Unlock()
+
+	if got.failed != true {
+		t.Fatal("失败标记应被记录（否则每个请求都要等一遍超时）")
+	}
+	if len(got.ids) != 2 {
+		t.Fatalf("拉取失败后仍应保留上次发现的模型，实得 %v", got.ids)
+	}
+	if got.ids[0] != "kimi-k3" {
+		t.Fatalf("保留的应是与之前相同的内容，实得 %v", got.ids)
 	}
 }

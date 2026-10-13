@@ -301,22 +301,21 @@ func UpstreamModelIDsCached(base, key, label string) []string {
 			ttl = upstreamModelFailTTL
 		}
 		if time.Since(e.at) < ttl {
-			if e.failed {
-				return nil
-			}
+			// failed 时 e.ids 是"上一次成功的结果"：可能为空（从没拉到过），
+			// 也可能是有效的旧表——旧表照用，别让渠道因为一次抖动就"没有模型"。
 			return e.ids
 		}
 	}
 
-	// 过期或缺失：交给后台补，本次先用旧值（没有就返回 nil，调用方回落账号池）。
+	// 过期或缺失：交给后台补，本次先用旧值（有就用，没有就返回 nil，调用方回落账号池）。
 	if _, loaded := upstreamModelInflight.LoadOrStore(ck, struct{}{}); !loaded {
 		go func() {
 			defer upstreamModelInflight.Delete(ck)
 			_, _ = FetchUpstreamModelIDs(base, key, label, UpstreamModelTimeoutInline)
 		}()
 	}
-	if ok && !e.failed {
-		return e.ids // 有陈旧值就先拿来用，避免列表瞬间变空
+	if ok {
+		return e.ids // 陈旧的也比没有好：避免渠道模型集在刷新期间闪现为空
 	}
 	return nil
 }
@@ -352,10 +351,18 @@ func FetchUpstreamModelIDs(base, key, label string, timeout time.Duration) ([]st
 	}
 	upstreamModelMu.Unlock()
 
-	// 失败也要落缓存（failT 标记），否则上游挂死时每个请求都要等一遍超时。
+	// 失败也要落缓存（failed 标记），否则上游挂死时每个请求都要等一遍超时。
+	//
+	// 但**必须保留上一次成功拿到的 ids**：早先的实现直接换成
+	// upstreamModelEntry{at:..., failed:true}（ids 为零值），等于"一次拉取失败就把
+	// 已经发现的模型表抹掉"。白名单留空的渠道会因此瞬间变成"没有任何模型"，那些
+	// 只有外部上游才有的模型集体掉回账号池并报 no_healthy_account（实测踩过：
+	// 8 个渠道模型一次性从列表里消失、调用全挂）。
+	// 保留旧值后的语义是"上游暂时问不到，但上次的结论仍然有效"，直到拉取恢复。
 	rememberFail := func() {
 		upstreamModelMu.Lock()
-		upstreamModelCache[ck] = upstreamModelEntry{at: time.Now(), failed: true}
+		prev := upstreamModelCache[ck]
+		upstreamModelCache[ck] = upstreamModelEntry{ids: prev.ids, at: time.Now(), failed: true}
 		upstreamModelMu.Unlock()
 	}
 

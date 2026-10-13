@@ -237,6 +237,33 @@ func (r *channelRouter) Set(ch *Channels) {
 	r.id2pfx = nil // 让下次解析重建快照（绑定表变了，快照可能要重算）
 	r.refreshedAt = time.Time{}
 	r.mu.Unlock()
+
+	// 预热外部渠道的上游模型表。
+	//
+	// 请求路径只读缓存（server.UpstreamModelIDsCached），缓存空着的那段时间里，
+	// 白名单留空的渠道会判成"没有任何模型"——只有外部上游才有的模型会掉回账号池并报
+	// no_healthy_account。启动或配置热生效的瞬间正好落在这个窗口里，所以在这里
+	// 主动把缓存捂热，把这个空窗消掉。
+	// 后台执行、失败无副作用：它只是让缓存更早填上，不改变任何判定语义。
+	primed := map[string]bool{}
+	for _, info := range byID {
+		if info.IsExternal() && !primed[info.UpstreamURL] {
+			primed[info.UpstreamURL] = true
+			go func(in server.ChannelInfo) {
+				_, _ = server.FetchUpstreamModelIDs(in.UpstreamURL, in.UpstreamKey, in.Label,
+					server.UpstreamModelTimeoutInteractive)
+			}(info)
+		}
+	}
+	for _, info := range byPrefix {
+		if info.IsExternal() && !primed[info.UpstreamURL] {
+			primed[info.UpstreamURL] = true
+			go func(in server.ChannelInfo) {
+				_, _ = server.FetchUpstreamModelIDs(in.UpstreamURL, in.UpstreamKey, in.Label,
+					server.UpstreamModelTimeoutInteractive)
+			}(info)
+		}
+	}
 }
 
 // Resolve 实现 server.ChannelResolver。id 为请求命中的调用密钥 ID。
