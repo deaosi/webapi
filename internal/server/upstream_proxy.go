@@ -271,6 +271,56 @@ const UpstreamModelTimeoutInteractive = 20 * time.Second
 // 也不能让一个挂掉的上游把整条链路拖死。
 const UpstreamModelTimeoutInline = 3 * time.Second
 
+// upstreamModelInflight 后台刷新的单飞标记（同一上游只允许一个刷新在跑）。
+var upstreamModelInflight sync.Map
+
+// UpstreamModelIDsCached 只读缓存的模型表；缓存缺失/过期时触发**后台**刷新，
+// 本次返回已有值（可能为 nil）。
+//
+// 为什么请求路径必须用它而**不能**同步去拉：
+//   /v1/models 不只服务客户端，它还是 **zen 网关验证调用密钥的鉴权依据**——
+//   zen 用 8 秒超时回调本接口，非 200 就判定"密钥无效"，**并把这个结论缓存住**。
+//   也就是说，这里为了拿上游模型表阻塞一次慢响应，就可能让一把完全合法的密钥
+//   被判无效、而且在 TTL 内持续被拒（表现为用户看到的"key 突然无效了"）。
+//   所以请求路径一律不发起同步上游请求：拿缓存值渲染，后台把缓存补上。
+func UpstreamModelIDsCached(base, key, label string) []string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(base + "\x1f" + key))
+	ck := hex.EncodeToString(sum[:])
+
+	upstreamModelMu.Lock()
+	e, ok := upstreamModelCache[ck]
+	upstreamModelMu.Unlock()
+
+	if ok {
+		ttl := upstreamModelTTL
+		if e.failed {
+			ttl = upstreamModelFailTTL
+		}
+		if time.Since(e.at) < ttl {
+			if e.failed {
+				return nil
+			}
+			return e.ids
+		}
+	}
+
+	// 过期或缺失：交给后台补，本次先用旧值（没有就返回 nil，调用方回落账号池）。
+	if _, loaded := upstreamModelInflight.LoadOrStore(ck, struct{}{}); !loaded {
+		go func() {
+			defer upstreamModelInflight.Delete(ck)
+			_, _ = FetchUpstreamModelIDs(base, key, label, UpstreamModelTimeoutInline)
+		}()
+	}
+	if ok && !e.failed {
+		return e.ids // 有陈旧值就先拿来用，避免列表瞬间变空
+	}
+	return nil
+}
+
 // FetchUpstreamModelIDs 拉取上游的模型 id 列表（GET <base>/models），带缓存。
 //
 // 供 /v1/models、chat 的模型判定、面板"拉取上游模型"共用。任何失败都原样返回 error，
@@ -390,7 +440,8 @@ func externalChannelModels(ch ChannelInfo, poolBare []string) []map[string]any {
 	if hasStar {
 		// `*` = 不限制，全部模型都走外部上游（含与池子同名的）——这是运维显式写下的
 		// 独占意图，所以这里用上游全表展开，不再排除池子已有的模型。
-		if ids, err := FetchUpstreamModelIDs(ch.UpstreamURL, ch.UpstreamKey, ch.Label, UpstreamModelTimeoutInline); err == nil {
+		// 同上：热路径只读缓存。
+		if ids := UpstreamModelIDsCached(ch.UpstreamURL, ch.UpstreamKey, ch.Label); len(ids) > 0 {
 			concrete = append(concrete, ids...)
 		}
 	}

@@ -85,8 +85,11 @@ func ChannelModelSet(ch ChannelInfo, poolBare []string) []string {
 	if !ch.IsExternal() {
 		return nil
 	}
-	ids, err := FetchUpstreamModelIDs(ch.UpstreamURL, ch.UpstreamKey, ch.Label, UpstreamModelTimeoutInline)
-	if err != nil || len(ids) == 0 {
+	// 只读缓存（+ 后台补齐），绝不在这里同步等上游：本函数在 chat 判定与 /v1/models
+	// 两个热路径上被调用，而 /v1/models 又是 zen 的鉴权依据，阻塞会演变成
+	// "合法密钥被判无效"。详见 UpstreamModelIDsCached 的注释。
+	ids := UpstreamModelIDsCached(ch.UpstreamURL, ch.UpstreamKey, ch.Label)
+	if len(ids) == 0 {
 		return nil
 	}
 	// 自动模式：只接管**池子里没有的**上游模型（纯新增）。
