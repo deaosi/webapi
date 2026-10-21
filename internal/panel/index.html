@@ -1416,7 +1416,7 @@ select.grp-sel { max-width: 130px; }
         <input id="akName" maxlength="80" placeholder="例如：桌面客户端" autocomplete="off">
         <span class="hint">最多 80 个字符</span></label></div>
       <div id="akCreated" hidden>
-        <p class="ak-note">请立即复制并保存完整密钥。仅本次显示，关闭后无法再次查看。</p>
+        <p class="ak-note">请复制并保存完整密钥。之后在列表里点该行的「查看」还能再次获取（需再输一次管理员密钥）。</p>
         <textarea class="ak-secret" id="akSecret" readonly spellcheck="false" aria-label="完整调用密钥"></textarea>
       </div>
       <div class="state err" id="akModalError" role="status" hidden></div>
@@ -1425,6 +1425,31 @@ select.grp-sel { max-width: 130px; }
       <button type="button" class="primary" id="akSave" data-act="ak-save">创建</button>
       <button type="button" class="primary" id="akCopySecret" data-act="ak-copy-secret" hidden>复制完整密钥</button>
       <button type="button" id="akClose" data-act="ak-close">取消</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 查看 / 重置调用密钥：先输管理员密钥二次确认 -->
+<div class="veil" id="akGuardVeil">
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="akGuardTitle">
+    <header>
+      <h3 id="akGuardTitle">查看调用密钥</h3>
+      <div class="hint"><span id="akGuardWho"></span> · <span id="akGuardHint">再次输入管理员密钥后才会显示完整密钥。</span></div>
+    </header>
+    <div class="body">
+      <div id="akGuardEditor"><label class="fld"><span class="lb">管理员密钥</span>
+        <input id="akGuardKey" type="password" placeholder="config.json 里的 api_key" autocomplete="current-password">
+        <span class="hint">面板管理员密钥，与调用密钥不是同一把。</span></label></div>
+      <div id="akGuardResult" hidden>
+        <p class="ak-note" id="akGuardNote"></p>
+        <textarea class="ak-secret" id="akGuardSecret" readonly spellcheck="false" aria-label="完整调用密钥"></textarea>
+      </div>
+      <div class="state err" id="akGuardError" role="status" hidden></div>
+    </div>
+    <footer><span class="grow"></span>
+      <button type="button" class="primary" id="akGuardGo" data-act="ak-guard-go">查看密钥</button>
+      <button type="button" class="primary" id="akGuardCopy" data-act="ak-guard-copy" hidden>复制完整密钥</button>
+      <button type="button" id="akGuardClose" data-act="ak-guard-close">取消</button>
     </footer>
   </div>
 </div>

@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/apikeys"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 )
 
 const maxAPIKeyBody = 4096
@@ -83,6 +84,82 @@ func (p *Panel) deleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// requireAdminKey 二次确认：请求体必须带当前管理员密钥。
+//
+// 面板的每个 /panel/api/* 请求本来就带着管理员 Bearer，这里再要一次不是为了
+// 补鉴权缺口，而是让"把明文摊在屏幕上"成为一个需要人明确在场的动作：浏览器
+// 停在面板上没人管时，顺手一点看不到任何密钥。
+//
+// 面板未启用鉴权（apiKey()==""）时拒绝：没有可核对的口令，二次确认没有意义。
+func (p *Panel) requireAdminKey(w http.ResponseWriter, r *http.Request) bool {
+	w.Header().Set("Cache-Control", "no-store")
+	r.Body = http.MaxBytesReader(w, r.Body, maxAPIKeyBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var body struct {
+		AdminKey string `json:"admin_key"`
+	}
+	if err := dec.Decode(&body); err != nil {
+		writeAPIKeyDecodeError(w, err)
+		return false
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		writeErr(w, http.StatusBadRequest, "request body must contain one JSON object")
+		return false
+	}
+	admin := p.apiKey()
+	if admin == "" {
+		writeErr(w, http.StatusConflict, "面板未启用管理员密钥，无法查看调用密钥明文")
+		return false
+	}
+	if !httpauth.VerifySecret(body.AdminKey, admin) {
+		writeErr(w, http.StatusForbidden, "管理员密钥不正确")
+		return false
+	}
+	return true
+}
+
+// revealAPIKey 返回某个调用密钥的明文（需要管理员密钥二次确认）。
+func (p *Panel) revealAPIKey(w http.ResponseWriter, r *http.Request) {
+	if !p.apiKeysAvailable(w) {
+		return
+	}
+	if !p.requireAdminKey(w, r) {
+		return
+	}
+	secret, err := p.cfg.APIKeys.Reveal(r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, apikeys.ErrSecretUnavailable) {
+			// 单独给一个机器码：前端据此把"只能重置"这条路直接摆出来。
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"ok":    false,
+				"code":  "secret_unavailable",
+				"error": "该密钥创建于旧版本（明文未保存）或管理员密钥已更换，无法查看；请用「重置」生成新密钥",
+			})
+			return
+		}
+		writeAPIKeyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "secret": secret})
+}
+
+// rotateAPIKey 给已有调用密钥换一把新明文：旧的立即失效，其余元数据不变。
+func (p *Panel) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	if !p.apiKeysAvailable(w) {
+		return
+	}
+	if !p.requireAdminKey(w, r) {
+		return
+	}
+	key, secret, err := p.cfg.APIKeys.Rotate(r.PathValue("id"))
+	if err != nil {
+		writeAPIKeyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": key, "secret": secret})
 }
 
 func decodeAPIKeyBody(w http.ResponseWriter, r *http.Request, dst any) bool {

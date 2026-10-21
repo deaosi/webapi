@@ -103,6 +103,8 @@ func TestAPIClientKeyCannotManagePanel(t *testing.T) {
 		{"POST", base, `{"name":"unauthorized"}`},
 		{"PATCH", base + "/" + key.ID, `{"enabled":false}`},
 		{"DELETE", base + "/" + key.ID, ""},
+		{"POST", base + "/" + key.ID + "/reveal", `{"admin_key":"administrator-secret"}`},
+		{"POST", base + "/" + key.ID + "/rotate", `{"admin_key":"administrator-secret"}`},
 		{"GET", "/panel/api/config", ""},
 		{"GET", "/panel/api/logs", ""},
 	} {
@@ -155,6 +157,86 @@ func TestAPIKeyRoutesRejectInvalidBodies(t *testing.T) {
 	}
 }
 
+// TestAPIKeyRevealRequiresAdminKey 覆盖二次确认：口令错/缺 → 拒绝，且不泄露明文。
+func TestAPIKeyRevealRequiresAdminKey(t *testing.T) {
+	p, store := newAPIKeyTestPanel(t)
+	key, secret, err := store.Create("client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/panel/api/api_keys/" + key.ID + "/reveal"
+	for _, c := range []struct {
+		body   string
+		status int
+	}{
+		{``, http.StatusBadRequest},
+		{`{}`, http.StatusForbidden},
+		{`{"admin_key":""}`, http.StatusForbidden},
+		{`{"admin_key":"wrong"}`, http.StatusForbidden},
+		{`{"admin_key":"administrator-secret","extra":1}`, http.StatusBadRequest},
+	} {
+		rec := apiKeyRequest(p, "POST", path, c.body, "administrator-secret")
+		if rec.Code != c.status || strings.Contains(rec.Body.String(), secret) {
+			t.Errorf("reveal body=%q code=%d want=%d response=%s", c.body, rec.Code, c.status, rec.Body)
+		}
+	}
+	ok := apiKeyRequest(p, "POST", path, `{"admin_key":"administrator-secret"}`, "administrator-secret")
+	if ok.Code != http.StatusOK || !strings.Contains(ok.Body.String(), secret) {
+		t.Fatalf("reveal with admin key: code=%d body=%s", ok.Code, ok.Body)
+	}
+	if ok.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("reveal must not be cached: %q", ok.Header().Get("Cache-Control"))
+	}
+}
+
+// TestAPIKeyRevealLegacyEntryThenRotate 覆盖旧条目的真实处境：明文从未落盘，
+// 只能重置；重置之后同一把密钥就能被查看了。
+func TestAPIKeyRevealLegacyEntryThenRotate(t *testing.T) {
+	store, err := apikeys.New(filepath.Join(t.TempDir(), "keys.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 先建密钥、后建面板：这条密钥的明文没有落盘（等价于旧版本创建的条目）。
+	key, legacySecret, err := store.Create("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := New(Config{APIKey: "administrator-secret", APIKeys: store})
+	base := "/panel/api/api_keys/" + key.ID
+	reveal := apiKeyRequest(p, "POST", base+"/reveal", `{"admin_key":"administrator-secret"}`, "administrator-secret")
+	if reveal.Code != http.StatusConflict || !strings.Contains(reveal.Body.String(), `"code":"secret_unavailable"`) {
+		t.Fatalf("legacy reveal: code=%d body=%s", reveal.Code, reveal.Body)
+	}
+	rotated := apiKeyRequest(p, "POST", base+"/rotate", `{"admin_key":"administrator-secret"}`, "administrator-secret")
+	if rotated.Code != http.StatusOK {
+		t.Fatalf("rotate: code=%d body=%s", rotated.Code, rotated.Body)
+	}
+	var result struct {
+		OK     bool        `json:"ok"`
+		Key    apikeys.Key `json:"key"`
+		Secret string      `json:"secret"`
+	}
+	if err := json.Unmarshal(rotated.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Secret == "" || result.Secret == legacySecret || result.Key.ID != key.ID ||
+		result.Key.Name != key.Name || result.Key.Prefix != result.Secret[:16] {
+		t.Fatalf("unexpected rotate result: %#v", result)
+	}
+	verify := func(secret string) bool {
+		req := httptest.NewRequest("GET", "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+secret)
+		return store.VerifyBearer(req)
+	}
+	if verify(legacySecret) || !verify(result.Secret) {
+		t.Fatal("rotate must invalidate the old secret and enable the new one")
+	}
+	again := apiKeyRequest(p, "POST", base+"/reveal", `{"admin_key":"administrator-secret"}`, "administrator-secret")
+	if again.Code != http.StatusOK || !strings.Contains(again.Body.String(), result.Secret) {
+		t.Fatalf("reveal after rotate: code=%d body=%s", again.Code, again.Body)
+	}
+}
+
 func TestAPIKeyRoutesUnavailableWithoutStore(t *testing.T) {
 	p := New(Config{APIKey: "administrator-secret"})
 	for _, c := range []struct{ method, path string }{
@@ -162,6 +244,8 @@ func TestAPIKeyRoutesUnavailableWithoutStore(t *testing.T) {
 		{"POST", "/panel/api/api_keys"},
 		{"PATCH", "/panel/api/api_keys/missing"},
 		{"DELETE", "/panel/api/api_keys/missing"},
+		{"POST", "/panel/api/api_keys/missing/reveal"},
+		{"POST", "/panel/api/api_keys/missing/rotate"},
 	} {
 		rec := apiKeyRequest(p, c.method, c.path, `{"name":"test"}`, "administrator-secret")
 		if rec.Code != http.StatusNotImplemented {

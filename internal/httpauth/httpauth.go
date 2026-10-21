@@ -36,6 +36,19 @@ func VerifyBearer(r *http.Request, key string) bool {
 	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
 }
 
+// VerifySecret 比较一个显式给出的口令（不来自请求头）。
+//
+// 用于面板里"查看调用密钥明文前再输一次管理员密钥"这类二次确认：调用方本来
+// 已经带着管理员 Bearer，这里要的是人再确认一次，所以走同一套摘要比较。
+// key 为空表示面板未启用鉴权：此时没有可核对的口令，一律判失败（否则空口令
+// 就能通过这道确认，二次确认形同虚设）。
+func VerifySecret(given, key string) bool {
+	if key == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare(digest(given), digest(key)) == 1
+}
+
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。
 func digest(s string) []byte {
 	sum := sha256.Sum256([]byte(s))

@@ -331,3 +331,78 @@ func TestConcurrentMutationsKeepAllKeys(t *testing.T) {
 		unique[secret] = true
 	}
 }
+
+// fakeSealer 用固定前缀充当"加密"，只用来验证 Reveal/Rotate 的存取路径。
+type fakeSealer struct{ prefix string }
+
+func (f fakeSealer) Seal(plaintext string) (string, error) { return f.prefix + plaintext, nil }
+
+func (f fakeSealer) Open(blob string) (string, error) {
+	if !strings.HasPrefix(blob, f.prefix) {
+		return "", errors.New("unexpected seal")
+	}
+	return strings.TrimPrefix(blob, f.prefix), nil
+}
+
+func TestRevealAndRotate(t *testing.T) {
+	store, path := testStore(t)
+	store.SetSealer(fakeSealer{prefix: "sealed:"})
+	key, secret, err := store.Create("client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.Reveal(key.ID); err != nil || got != secret {
+		t.Fatalf("reveal=%q err=%v want=%q", got, err, secret)
+	}
+	// 密文随条目落盘：重开库仍能解开。
+	reopened, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.SetSealer(fakeSealer{prefix: "sealed:"})
+	if got, err := reopened.Reveal(key.ID); err != nil || got != secret {
+		t.Fatalf("reveal after reload=%q err=%v", got, err)
+	}
+	// 换过封存用的密钥 → 不可恢复，而不是把 500 丢出去。
+	reopened.SetSealer(fakeSealer{prefix: "other:"})
+	if _, err := reopened.Reveal(key.ID); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("reveal after sealer change err=%v", err)
+	}
+	rotated, next, err := reopened.Rotate(key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == secret || !verifyToken(reopened, next) || verifyToken(reopened, secret) {
+		t.Fatal("rotate did not replace the secret")
+	}
+	if rotated.ID != key.ID || rotated.Name != key.Name || !rotated.Enabled || rotated.Prefix != next[:16] {
+		t.Fatalf("rotate changed metadata: %#v", rotated)
+	}
+	if got, err := reopened.Reveal(key.ID); err != nil || got != next {
+		t.Fatalf("reveal after rotate=%q err=%v", got, err)
+	}
+}
+
+func TestRevealWithoutSealerIsUnavailable(t *testing.T) {
+	store, _ := testStore(t)
+	key, _, err := store.Create("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reveal(key.ID); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("reveal without sealer err=%v", err)
+	}
+	if _, err := store.Reveal("missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("reveal missing err=%v", err)
+	}
+	if _, _, err := store.Rotate("missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rotate missing err=%v", err)
+	}
+	// 没有 sealer 也能重置（只是新密钥同样看不了明文）。
+	if _, secret, err := store.Rotate(key.ID); err != nil || !verifyToken(store, secret) {
+		t.Fatalf("rotate without sealer err=%v", err)
+	}
+	if _, err := store.Reveal(key.ID); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("reveal after rotate without sealer err=%v", err)
+	}
+}

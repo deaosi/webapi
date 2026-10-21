@@ -1,5 +1,11 @@
 // Package apikeys stores revocable API client keys separately from the panel's
-// administrator key. Plaintext keys are returned only when they are created.
+// administrator key.
+//
+// 明文策略：库本身只保存 SHA-256 摘要，创建时把明文返回一次。若调用方安装了
+// Sealer（面板用管理员密钥派生 AES-256-GCM），明文会以密文形式随条目落盘，
+// 于是「稍后再次查看」成为可能，而数据文件单独泄露并不等于交出全部调用密钥。
+// 未安装 Sealer 或条目创建于旧版本时，明文不可恢复（ErrSecretUnavailable），
+// 只能 Rotate 换一把新的。
 package apikeys
 
 import (
@@ -26,7 +32,19 @@ import (
 var (
 	ErrNotFound    = errors.New("API key not found")
 	ErrInvalidName = errors.New("API key name must contain 1 to 80 characters and no control characters")
+	// ErrSecretUnavailable：该条目的明文不可恢复（未安装 Sealer、条目创建于
+	// 明文落盘之前的版本，或封存用的管理员密钥已被更换）。
+	ErrSecretUnavailable = errors.New("API key secret is not recoverable")
 )
+
+// Sealer 把调用密钥明文封装成可落盘的密文。
+//
+// 面板用「管理员密钥派生 AES-256-GCM」实现；Open 失败（换过管理员密钥、
+// 密文损坏）由调用方翻译成 ErrSecretUnavailable，提示改用 Rotate。
+type Sealer interface {
+	Seal(plaintext string) (string, error)
+	Open(blob string) (string, error)
+}
 
 const (
 	secretPrefix = "sk-wb2a-"
@@ -60,6 +78,8 @@ type Usage struct {
 type storedKey struct {
 	Key
 	SHA256 string `json:"sha256"`
+	// Sealed 是调用密钥明文的密文（base64url）。空 = 不可恢复，只能 Rotate。
+	Sealed string `json:"sealed,omitempty"`
 	Usage  Usage  `json:"usage"`
 }
 
@@ -70,9 +90,17 @@ type diskStore struct {
 
 // Store serializes mutations and publishes them only after an atomic save.
 type Store struct {
-	mu   sync.RWMutex
-	path string
-	keys []storedKey
+	mu     sync.RWMutex
+	path   string
+	keys   []storedKey
+	sealer Sealer // nil = 明文不落盘（只能创建时查看一次）
+}
+
+// SetSealer 安装明文封装器。必须在开始对外服务之前调用（面板构造时装配）。
+func (s *Store) SetSealer(sealer Sealer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sealer = sealer
 }
 
 // New loads an existing store. A missing file starts empty, while invalid files
@@ -161,7 +189,15 @@ func (s *Store) Create(name string) (Key, string, error) {
 		Enabled:   true,
 		CreatedAt: time.Now().UTC(),
 	}
-	next := append(append([]storedKey{}, s.keys...), storedKey{Key: key, SHA256: hex.EncodeToString(digest[:])})
+	stored := storedKey{Key: key, SHA256: hex.EncodeToString(digest[:])}
+	if s.sealer != nil {
+		sealed, err := s.sealer.Seal(secret)
+		if err != nil {
+			return Key{}, "", fmt.Errorf("seal API key: %w", err)
+		}
+		stored.Sealed = sealed
+	}
+	next := append(append([]storedKey{}, s.keys...), stored)
 	if err := s.save(next); err != nil {
 		return Key{}, "", err
 	}
@@ -200,6 +236,66 @@ func (s *Store) Update(id string, name *string, enabled *bool) (Key, error) {
 		return next[i].Key, nil
 	}
 	return Key{}, ErrNotFound
+}
+
+// Reveal 返回某个条目的调用密钥明文。
+//
+// 前提是安装过 Sealer 且该条目保存了密文；创建于旧版本（明文从未落盘）或
+// 管理员密钥已更换导致解封失败，一律返回 ErrSecretUnavailable —— 上层据此
+// 提示"只能重置"，而不是把一个 500 丢给用户。
+func (s *Store) Reveal(id string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sealer := s.sealer
+	for _, key := range s.keys {
+		if key.ID != id {
+			continue
+		}
+		if sealer == nil || key.Sealed == "" {
+			return "", ErrSecretUnavailable
+		}
+		plain, err := sealer.Open(key.Sealed)
+		if err != nil {
+			return "", ErrSecretUnavailable
+		}
+		return plain, nil
+	}
+	return "", ErrNotFound
+}
+
+// Rotate 为已有条目换一把新密钥：旧明文立即失效，名字/启用状态/调用统计不变。
+// 返回新元数据与新明文（与 Create 一样，明文只在此刻与 Reveal 时可见）。
+func (s *Store) Rotate(id string) (Key, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, key := range s.keys {
+		if key.ID != id {
+			continue
+		}
+		var entropy [32]byte
+		if _, err := rand.Read(entropy[:]); err != nil {
+			return Key{}, "", fmt.Errorf("generate API key: %w", err)
+		}
+		secret := secretPrefix + base64.RawURLEncoding.EncodeToString(entropy[:])
+		digest := sha256.Sum256([]byte(secret))
+		next := append([]storedKey{}, s.keys...)
+		next[i].Prefix = secret[:16]
+		next[i].SHA256 = hex.EncodeToString(digest[:])
+		next[i].Sealed = ""
+		if s.sealer != nil {
+			sealed, err := s.sealer.Seal(secret)
+			if err != nil {
+				return Key{}, "", fmt.Errorf("seal API key: %w", err)
+			}
+			next[i].Sealed = sealed
+		}
+		if err := s.save(next); err != nil {
+			return Key{}, "", err
+		}
+		s.keys = next
+		return next[i].Key, secret, nil
+	}
+	return Key{}, "", ErrNotFound
 }
 
 // Delete revokes a key and persists its removal.

@@ -150,6 +150,8 @@ func New(cfg Config) *Panel {
 		logs:    NewRing(500),
 		logins:  map[string]loginSession{},
 	}
+	// 先装封存器再注册路由：此后新建的调用密钥明文才会随条目落盘（可再次查看）。
+	p.installAPIKeySealer()
 	p.routes()
 	return p
 }
@@ -203,6 +205,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/api_keys", p.withAuth(p.createAPIKey))
 	p.mux.HandleFunc("PATCH /panel/api/api_keys/{id}", p.withAuth(p.updateAPIKey))
 	p.mux.HandleFunc("DELETE /panel/api/api_keys/{id}", p.withAuth(p.deleteAPIKey))
+	// 查看明文 / 重置密钥：都要在请求体里再带一次管理员密钥（二次确认）。
+	p.mux.HandleFunc("POST /panel/api/api_keys/{id}/reveal", p.withAuth(p.revealAPIKey))
+	p.mux.HandleFunc("POST /panel/api/api_keys/{id}/rotate", p.withAuth(p.rotateAPIKey))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

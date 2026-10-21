@@ -50,7 +50,13 @@ async function api(path, opts = {}) {
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
   if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  if (!r.ok) {
+    // 带上服务端的机器码（如 secret_unavailable），调用方据此走不同分支，
+    // 不必去匹配错误文案。
+    const err = new Error(d.error || ('HTTP ' + r.status));
+    if (d && typeof d.code === 'string') err.code = d.code;
+    throw err;
+  }
   return d;
 }
 function toast(msg, cls) {
@@ -439,7 +445,9 @@ function renderAPIKeys() {
       '<td>' + (lastUsed ? esc(fmtLocalDateTime(lastUsed)) +
         (used.last_model ? ' <span class="tag mute">' + esc(used.last_model) + '</span>' : '') : '—') + '</td>' +
       '<td>' + esc(created ? fmtLocalDateTime(created) : '—') + '</td>' +
-      '<td><div class="acts"><button type="button" data-act="ak-rename"' + attrs + '>改名</button>' +
+      '<td><div class="acts"><button type="button" data-act="ak-reveal"' + attrs + ' title="重新查看并复制完整密钥（需要管理员密钥）">查看</button>' +
+      '<button type="button" data-act="ak-rotate"' + attrs + ' title="为该密钥换一把新密钥，旧的立即失效">重置</button>' +
+      '<button type="button" data-act="ak-rename"' + attrs + '>改名</button>' +
       '<button type="button" data-act="ak-toggle"' + attrs + '>' + (busy ? '处理中…' : (key.enabled ? '停用' : '启用')) + '</button>' +
       '<button type="button" class="danger" data-act="ak-delete"' + attrs + '>删除</button></div></td></tr>';
   }).join('');
@@ -519,7 +527,7 @@ async function submitAPIKey() {
       s.secret = String(data.secret);
       $('akSecret').value = s.secret;
       $('akTitle').textContent = '调用密钥已创建';
-      $('akModalHint').textContent = '完整密钥仅本次显示，请保存到需要调用 API 的应用。';
+      $('akModalHint').textContent = '完整密钥会保存在面板里，之后可点该行的「查看」再次获取（需再输一次管理员密钥）。';
       $('akEditor').hidden = true; $('akCreated').hidden = false;
       $('akSave').hidden = true; $('akCopySecret').hidden = false; $('akClose').textContent = '已保存，关闭';
       $('akCopySecret').focus();
@@ -561,7 +569,86 @@ async function deleteAPIKey(id) {
   } catch (e) { s.error = '删除失败：' + e.message; toast(s.error, 'err'); }
   finally { s.busyID = ''; renderAPIKeys(); }
 }
+/* 查看 / 重置调用密钥：先输管理员密钥做二次确认，确认后才显示明文。
+   面板的每个请求本来就带着管理员 Bearer，这道确认的作用是让"把密钥摊在屏幕上"
+   成为需要人明确在场的动作，而不是打开页面就能看到。 */
+const akGuard = { mode: '', id: '', busy: false, done: false };
+function akGuardError(msg) {
+  $('akGuardError').textContent = msg;
+  $('akGuardError').hidden = !msg;
+}
+function openAKGuard(mode, id) {
+  const key = apiKeyState.rows.find(row => row.id === id);
+  if (!key) return;
+  akGuard.mode = mode; akGuard.id = id; akGuard.busy = false; akGuard.done = false;
+  $('akGuardTitle').textContent = mode === 'rotate' ? '重置调用密钥' : '查看调用密钥';
+  $('akGuardWho').textContent = key.name || '未命名';
+  $('akGuardHint').textContent = mode === 'rotate'
+    ? '重置会立刻换一把新密钥，旧的立即失效。请先输入管理员密钥确认。'
+    : '再次输入管理员密钥后才会显示完整密钥。';
+  $('akGuardKey').value = ''; $('akGuardKey').disabled = false;
+  $('akGuardEditor').hidden = false; $('akGuardResult').hidden = true;
+  $('akGuardSecret').value = '';
+  akGuardError('');
+  $('akGuardGo').hidden = false; $('akGuardGo').disabled = false;
+  $('akGuardGo').textContent = mode === 'rotate' ? '确认重置' : '查看密钥';
+  $('akGuardCopy').hidden = true;
+  $('akGuardClose').disabled = false; $('akGuardClose').textContent = '取消';
+  $('akGuardVeil').classList.add('on');
+  $('akGuardKey').focus();
+}
+function closeAKGuard() {
+  if (akGuard.busy) return;
+  $('akGuardKey').value = ''; $('akGuardSecret').value = '';
+  $('akGuardVeil').classList.remove('on');
+  akGuard.mode = ''; akGuard.id = ''; akGuard.done = false;
+  akGuardError('');
+}
+async function submitAKGuard() {
+  if (akGuard.busy || akGuard.done || !akGuard.id) return;
+  const adminKey = $('akGuardKey').value;
+  if (!adminKey.trim()) { akGuardError('请输入管理员密钥'); $('akGuardKey').focus(); return; }
+  if (akGuard.mode === 'rotate' && !confirm('重置后旧密钥立即失效，正在使用它的应用必须换成新密钥。确认重置？')) return;
+  akGuard.busy = true;
+  $('akGuardKey').disabled = true; $('akGuardGo').disabled = true; $('akGuardClose').disabled = true;
+  $('akGuardGo').textContent = '处理中…';
+  akGuardError('');
+  try {
+    const suffix = akGuard.mode === 'rotate' ? '/rotate' : '/reveal';
+    const data = await api('api_keys/' + encodeURIComponent(akGuard.id) + suffix,
+      { method: 'POST', body: JSON.stringify({ admin_key: adminKey }) });
+    if (!data.secret) throw new Error('服务没有返回密钥内容');
+    if (data.key && data.key.id) {
+      const metadata = apiKeyMetadata(data.key);
+      apiKeyState.rows = apiKeyState.rows.map(row => row.id === metadata.id ? metadata : row);
+      renderAPIKeys();
+    }
+    akGuard.done = true;
+    $('akGuardSecret').value = String(data.secret);
+    $('akGuardNote').textContent = akGuard.mode === 'rotate'
+      ? '旧密钥已失效。请立刻把新密钥更新到使用它的应用里。'
+      : '这是当前生效的完整密钥，可直接复制。';
+    $('akGuardEditor').hidden = true; $('akGuardResult').hidden = false;
+    $('akGuardGo').hidden = true; $('akGuardCopy').hidden = false;
+    $('akGuardClose').textContent = '关闭';
+    $('akGuardCopy').focus();
+  } catch (e) {
+    // secret_unavailable：这条密钥的明文没有落盘（旧版本创建的），只能重置。
+    akGuardError(e && e.code === 'secret_unavailable'
+      ? e.message + '（可关掉本窗口，点该行的「重置」）'
+      : (e && e.message ? e.message : '操作失败'));
+    if (e && e.code === 'secret_unavailable') $('akGuardKey').disabled = true;
+  } finally {
+    akGuard.busy = false;
+    if (!akGuard.done) {
+      $('akGuardKey').disabled = false; $('akGuardGo').disabled = false;
+      $('akGuardGo').textContent = akGuard.mode === 'rotate' ? '确认重置' : '查看密钥';
+    }
+    $('akGuardClose').disabled = false;
+  }
+}
 document.addEventListener('click', async ev => {
+  if (ev.target === $('akGuardVeil')) { closeAKGuard(); return; }
   if (ev.target === $('apiKeyVeil')) { closeAPIKeyModal(); return; }
   const button = ev.target.closest('button[data-act]');
   if (!button || button.disabled || !button.dataset.act.startsWith('ak-')) return;
@@ -573,6 +660,16 @@ document.addEventListener('click', async ev => {
   else if (action === 'ak-refresh') await loadAPIKeys();
   else if (action === 'ak-toggle') await setAPIKeyEnabled(button.dataset.id);
   else if (action === 'ak-delete') await deleteAPIKey(button.dataset.id);
+  else if (action === 'ak-reveal') openAKGuard('reveal', button.dataset.id);
+  else if (action === 'ak-rotate') openAKGuard('rotate', button.dataset.id);
+  else if (action === 'ak-guard-go') await submitAKGuard();
+  else if (action === 'ak-guard-close') closeAKGuard();
+  else if (action === 'ak-guard-copy') {
+    const text = $('akGuardSecret').value;
+    if (!text) return;
+    try { await copyText(text); toast('完整密钥已复制', 'ok'); }
+    catch (e) { toast('复制失败，请手动选择并复制', 'err'); }
+  }
   else if (action === 'ak-prev' || action === 'ak-next') {
     apiKeyState.page += action === 'ak-next' ? 1 : -1; renderAPIKeys();
   } else if (action === 'ak-copy-url' || action === 'ak-copy-secret') {
@@ -583,6 +680,11 @@ document.addEventListener('click', async ev => {
   }
 });
 document.addEventListener('keydown', ev => {
+  if ($('akGuardVeil').classList.contains('on')) {
+    if (ev.key === 'Escape') { ev.preventDefault(); closeAKGuard(); }
+    else if (ev.key === 'Enter' && ev.target === $('akGuardKey')) { ev.preventDefault(); submitAKGuard(); }
+    return;
+  }
   if (!apiKeyState.modalOpen) return;
   if (ev.key === 'Escape') { ev.preventDefault(); closeAPIKeyModal(); }
   else if (ev.key === 'Enter' && ev.target === $('akName')) { ev.preventDefault(); submitAPIKey(); }
