@@ -369,7 +369,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string, remoteDefault string, httpc *http.Client) map[string]any {
 	entry := map[string]any{
 		"id":                   realm + ":" + mi.ID,
-		"name":                 mi.Name,
+		"name":                 mi.DisplayName(), // 家族名 + 上游声明的小版本（仅展示）
 		"default_effort":       mi.DefaultEffort,
 		"supported_efforts":    mi.Efforts,
 		"can_disable_thinking": mi.CanDisableThinking,
@@ -384,6 +384,12 @@ func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string
 		"only_reasoning":       mi.OnlyReasoning,
 		"reasoning_effort":     mi.ReasoningEffort,
 		"reasoning_summary":    mi.ReasoningSummary,
+	}
+	// 上游声明的小版本号（description 里的「已更新至 XXX-1017最新版」）。只用于
+	// 展示：面板模型表在 id 后面挂 v1017 徽标；id 与所有匹配逻辑都不受影响。
+	// 认不出就整体省略，不编造。
+	if v := mi.ModelVersion(); v != "" {
+		entry["version"] = v
 	}
 	// 限时优惠（modelPromotions）：credits 是牌价，promo_* 是当前生效折扣
 	//（WorkBuddy 客户端显示的就是这个生效价）。前端据此显示「生效价+标签+划线牌价」。

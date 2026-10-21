@@ -369,7 +369,12 @@ func fmtCreditsPrefix(raw string) string {
 // 字段（零值）整体省略——不编造。
 func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[string]any {
 	if mi.Name != "" {
-		entry["name"] = mi.Name
+		// 展示名带上上游声明的小版本（"Deepseek-V4.1-Flash" + "1017"）。
+		// 版本号只进 name，id 一个字都不动——路由、白名单、渠道分流都按 id 走。
+		entry["name"] = mi.DisplayName()
+		if v := mi.ModelVersion(); v != "" {
+			entry["version"] = v
+		}
 	}
 	if mi.Description != "" {
 		// 积分倍率前缀：从 "x0.05 credits" / "x0.29" 等格式提取纯数字，
