@@ -499,6 +499,14 @@ func Classify(status int, body string) ErrKind {
 		return ErrHardCredit
 	}
 	lower := strings.ToLower(body)
+	// 上游 console 域渠道校验拦截（400 code=11-128，文案 "This call failed channel
+	// verification" / "Request blocked. Please send it again"）：属于路径/客户端形态层面的
+	// 拒斥，不是账号授权故障。必须先于 accountFaultMarkers——后者的 "request illegal"
+	// marker 会命中本响应，把一个完全健康的账号禁用掉（症状：一次失败后该 realm 全量 503
+	// no_healthy_account）。归 ErrClient：只换号、不罚号。
+	if strings.Contains(body, `"code":11-128`) || strings.Contains(body, `"code": 11-128`) {
+		return ErrClient
+	}
 	// sessionDead / accountFault 先于 status==429：账号级终态等不来自愈，限流状态码
 	// 不得掩盖它们（429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须
 	// sessionDead——此层 marker 是精确词，比限流层的大范围子串更具体，具体优先于宽泛）。
@@ -734,15 +742,28 @@ func (c *Client) globalOn(a *auth.Auth) bool {
 	return c.GlobalEnabled && a != nil && a.Realm() == "global"
 }
 
-// 路径常量：CN 与 global 共用的 chat 出站路径（/v2 单路径）。
-const chatCompletionsPath = "/v2/chat/completions"
+// 路径常量：chat 出站路径。/v2 为 CN 与 global 的公共端点，
+// /console 仅 global 使用（见 chatPaths 的上游变更说明）。
+const (
+	chatCompletionsPath = "/v2/chat/completions"
+	consoleChatPath     = "/console/chat/completions"
+)
 
 // chatPaths 返回按 realm 的 chat 路径候选序列：
-// global → [/v2]（#119 固定单路径：/console 挂腾讯云 WAF body 内容规则，反引号
-// printf/whoami 等命令执行特征确定性 403；/v2 同 base 不挂该规则，实测等价端点。
-// 已知取舍：若上游未来关闭 /v2，global chat 整体不可用——届时应重新启用 /console
-// 路径，此注释即"坏了再说"的锚点）；cn → [/v2]（单元素，现状）。
+// global → [/console, /v2]（2026-10 上游变更后的顺序：/v2 已强制官方客户端渠道校验，
+// 非官方调用一律 400 code=11-128；/console 恢复可用且不再挂 #119 时代那套 WAF body
+// 规则——含反引号/printf/whoami 的 body 实测 200。保留 /v2 作 404/405 fallback，
+// 上游哪天把 /console 拿掉仍有一条路径可走）；cn → [/v2]（单元素，现状）。
 func (c *Client) chatPaths(a *auth.Auth) []string {
+	// 2026-10 上游行为变更（实测）：global 的 /v2/chat/completions 开始强制"官方客户端
+	// 渠道校验"，任何非官方客户端调用一律 400 code=11-128
+	// "This call failed channel verification / Request blocked. Please send it again"；
+	// 同一账号改打 /console/chat/completions 则 200 正常（流式、工具、含反引号/printf/
+	// whoami 的 body 全部放行——#119 时代那套 WAF body 规则已不存在）。
+	// 故 global 恢复 /console 优先、/v2 兜底；cn 维持单路径 /v2，零回归。
+	if c.globalOn(a) {
+		return []string{consoleChatPath, chatCompletionsPath}
+	}
 	return []string{chatCompletionsPath}
 }
 
@@ -987,6 +1008,21 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	return nil
 }
 
+// retryPathReject 判定一次 ≥400 响应是否为"换路径就能解决"的拒斥：
+//   - 404/405：候选端点在该 realm/版本不存在（上游新旧路径分叉的经典形态）；
+//   - 400 + code 11-128：上游渠道校验拒绝（该路径要求官方客户端形态）。
+//
+// 只用于 chat 层多路径 fallback，不参与错误分类（分类仍由 Classify 负责）。
+func retryPathReject(status int, body string) bool {
+	if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
+		return true
+	}
+	if status == http.StatusBadRequest {
+		return strings.Contains(body, `"code":11-128`) || strings.Contains(body, `"code": 11-128`)
+	}
+	return false
+}
+
 // ChatStream 发 chat 请求并返回原始 SSE body 流（调用方负责 Close）。
 // 等价于 ChatStreamContext(context.Background(), ...)：不带调用方取消语义。
 // 需要客户端断开联动的调用方用 ChatStreamContext 传入请求 ctx。
@@ -1025,7 +1061,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
-	for _, path := range c.chatPaths(a) {
+	paths := c.chatPaths(a)
+	for i, path := range paths {
 		endpoint := c.chatBase(a) + path
 		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
 		if err != nil {
@@ -1055,6 +1092,14 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			if rerr != nil {
 				log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.Nickname), rerr)
 				return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
+			}
+			// 路径级拒斥（404/405 端点不存在，或上游渠道校验 11-128）→ 同一账号换下一个
+			// 候选路径重试，不罚号：这是路径/客户端形态层面的问题，与账号授权无关。
+			if i+1 < len(paths) && retryPathReject(resp.StatusCode, string(raw)) {
+				log.Printf("WARN: [upstream] chat_stream acct=%s: path %s rejected (%d %s), falling back to %s",
+					logfmt.Label(a.UID, a.Nickname), path, resp.StatusCode,
+					truncate(string(raw), 120), paths[i+1])
+				continue
 			}
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
