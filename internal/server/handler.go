@@ -376,6 +376,13 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 			entry["version"] = v
 		}
 	}
+	// 上游目录里没给 name 的模型（如 global:hy4-preview-f）在客户端列表里会是一条
+	// 空白行，看着像"模型没加载出来"；回落成 id，至少能认出是哪个模型。
+	if name, _ := entry["name"].(string); strings.TrimSpace(name) == "" {
+		if id, _ := entry["id"].(string); id != "" {
+			entry["name"] = id
+		}
+	}
 	if mi.Description != "" {
 		// 积分倍率前缀：从 "x0.05 credits" / "x0.29" 等格式提取纯数字，
 		// 统一为 "[x0.05 credit]" 前缀拼入 description，方便下游面板直接展示。

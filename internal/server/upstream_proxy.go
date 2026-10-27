@@ -462,8 +462,11 @@ func externalChannelModels(ch ChannelInfo, poolBare []string) []map[string]any {
 		seen[m] = true
 		// 外部上游的模型名不带本网关的 realm 前缀：前缀是内部路由协议，
 		// 上游与客户端都不认。id 用裸名，与 chat 侧出站口径一致。
+		// name 也填裸名：客户端（DSH / Cherry Studio 等）列表里没有 name 就显示空白，
+		// 模型条目看着像"没加载出来"。
 		out = append(out, map[string]any{
 			"id":       m,
+			"name":     m,
 			"object":   "model",
 			"created":  1753600000,
 			"owned_by": ch.Label,
