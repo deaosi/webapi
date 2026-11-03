@@ -76,6 +76,9 @@ type Config struct {
 	QwenworkDevicePoll func(channel, nonce, verifier string) (map[string]any, error)
 	// QwenworkModels 拉取某千问办公渠道的模型目录（它自己的 /algo/api/v2/model/list）。
 	QwenworkModels func(channel string) ([]string, error)
+	// QwenworkAddAccount 用手工粘贴的令牌直接建账号（设备授权的备用通道）：
+	// 先打 UserInfo 验证令牌，再写进渠道配置。
+	QwenworkAddAccount func(channel, accessToken, refreshToken string) (map[string]any, error)
 	// QwenworkRemoveAccount 删除某千问办公渠道第 index 个已授权账号（写盘 + 热生效）。
 	QwenworkRemoveAccount func(channel string, index int) (int, error)
 
@@ -215,6 +218,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/channels/qwenwork/device_poll", p.withAuth(p.qwenworkDevicePoll))
 	p.mux.HandleFunc("POST /panel/api/channels/qwenwork/models", p.withAuth(p.qwenworkModels))
 	p.mux.HandleFunc("POST /panel/api/channels/qwenwork/account_remove", p.withAuth(p.qwenworkRemoveAccount))
+	p.mux.HandleFunc("POST /panel/api/channels/qwenwork/account_add", p.withAuth(p.qwenworkAddAccount))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	p.mux.HandleFunc("GET /panel/api/api_keys", p.withAuth(p.listAPIKeys))

@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -376,4 +377,31 @@ func QwenworkPollGrant(ctx context.Context, flow qwenwork.DeviceFlow) (qwenwork.
 // QwenworkChannelModels 按渠道定义拉模型目录（面板"拉模型"按钮用）。
 func QwenworkChannelModels(ch ChannelInfo) ([]string, error) {
 	return FetchQwenworkModels(ch, QwenworkModelTimeout)
+}
+
+// QwenworkAccountFromToken 用一枚手工粘贴的令牌建账号（设备授权的备用通道）。
+//
+// 为什么需要：设备授权要在浏览器里登录千问办公再等回调，网络或浏览器环境不配合时
+// 整条链路就卡在"没有账号"。这里允许直接粘贴 access_token：先真打一次 UserInfo 确认
+// 令牌有效（无效就当场报错，而不是存进配置等请求时才炸），再交给调用方落库。
+func QwenworkAccountFromToken(ctx context.Context, ch ChannelInfo, access, refresh string) (qwenwork.Account, error) {
+	access = strings.TrimSpace(access)
+	refresh = strings.TrimSpace(refresh)
+	if access == "" {
+		return qwenwork.Account{}, fmt.Errorf("access_token 不能为空")
+	}
+	acc := qwenwork.Account{AccessToken: access, RefreshToken: refresh}
+	base := strings.TrimSpace(ch.UpstreamURL)
+	if base == "" {
+		base = qwenwork.BaseURL
+	}
+	client := &qwenwork.Client{BaseURL: base, HTTP: &http.Client{Timeout: QwenworkModelTimeout}}
+	uid, name, email, err := client.UserInfo(ctx, acc)
+	if err != nil {
+		return qwenwork.Account{}, fmt.Errorf("令牌校验失败：%w", err)
+	}
+	acc.UID = strings.TrimSpace(uid)
+	acc.Nickname = strings.TrimSpace(name)
+	acc.Email = strings.TrimSpace(email)
+	return acc, nil
 }

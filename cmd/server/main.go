@@ -357,6 +357,41 @@ func main() {
 			}
 			return map[string]any{"pending": false, "account": acc, "saved": true}, nil
 		},
+		QwenworkAddAccount: func(channel, access, refresh string) (map[string]any, error) {
+			def, ok := chRouter.defByName(channel)
+			if !ok {
+				return nil, fmt.Errorf("渠道 %q 不存在（可能刚被删除，刷新后重试）", channel)
+			}
+			if def.Type != "qwenwork" {
+				return nil, fmt.Errorf("渠道 %q 不是千问办公渠道", channel)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			acc, err := server.QwenworkAccountFromToken(ctx, server.ChannelInfo{
+				Group:       channel,
+				Label:       def.Label,
+				Type:        def.Type,
+				UpstreamURL: def.UpstreamURL,
+			}, access, refresh)
+			if err != nil {
+				return nil, err
+			}
+			if err := mutateQwenAccounts(*cfgPath, live, p, up, sch, chRouter, func(groups map[string]any) error {
+				d, err := qwenGroup(groups, channel)
+				if err != nil {
+					return err
+				}
+				upsertQwenAccount(d, acc)
+				return nil
+			}); err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"uid":      acc.UID,
+				"nickname": acc.Nickname,
+				"email":    acc.Email,
+			}, nil
+		},
 		QwenworkRemoveAccount: func(channel string, index int) (int, error) {
 			left := 0
 			err := mutateQwenAccounts(*cfgPath, live, p, up, sch, chRouter, func(groups map[string]any) error {
@@ -563,6 +598,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	replaced := takeReplacePaths(incoming)
 	merged := mergeConfigMaps(cur, incoming)
 	applyReplacePaths(merged, replaced)
+	// 千问办公的非表单字段（地址/协议/账号）不能被一次普通保存抹掉。
+	keepQwenworkFields(merged, cur)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
 	newCfg, err := ParseConfig(mergedJSON(merged))

@@ -193,3 +193,35 @@ func (p *Panel) qwenworkRemoveAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "channel": name, "left": left})
 }
+
+// qwenworkAddAccount 处理 POST /panel/api/channels/qwenwork/account_add。
+//
+// 请求体 {"channel","access_token","refresh_token"}；响应 {ok,channel,account}。
+// 令牌只在这一跳出现：面板不落日志、不回显，落库后由服务端持有。
+func (p *Panel) qwenworkAddAccount(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.QwenworkAddAccount == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "当前进程未启用千问办公账号写入"})
+		return
+	}
+	var req struct {
+		Channel      string `json:"channel"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return
+	}
+	name := strings.TrimSpace(req.Channel)
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "channel 不能为空"})
+		return
+	}
+	acc, err := p.cfg.QwenworkAddAccount(name, req.AccessToken, req.RefreshToken)
+	if err != nil {
+		// 上游原话直接透出：粘错令牌时用户要看到"Invalid credential"而不是"添加失败"。
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "channel": name, "account": acc})
+}

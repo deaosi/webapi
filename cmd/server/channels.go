@@ -591,3 +591,53 @@ func (r *channelRouter) bindingsLocked() []channelBindingStatus {
 	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
 	return out
 }
+
+// keepQwenworkFields 保存前把千问办公渠道的"非表单字段"补回去。
+//
+// 为什么必须补：channels.groups 是整体替换（见 takeReplacePaths），浏览器提交的定义里
+// upstream_url / upstream_type 是隐藏项、accounts 由授权端点单独维护。只要有人改一次
+// 标签或白名单并保存，这三项就会从配置里消失——表现为渠道页地址变空、账号清零、
+// 请求全部失败。这里按渠道名从上一版配置里接住，缺失时才落默认值。
+func keepQwenworkFields(merged, prev map[string]any) {
+	mch, _ := merged["channels"].(map[string]any)
+	if mch == nil {
+		return
+	}
+	groups, _ := mch["groups"].(map[string]any)
+	if groups == nil {
+		return
+	}
+	pch, _ := prev["channels"].(map[string]any)
+	pgroups, _ := pch["groups"].(map[string]any)
+	for name, raw := range groups {
+		def, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := def["type"].(string); strings.TrimSpace(t) != "qwenwork" {
+			continue
+		}
+		var old map[string]any
+		if pgroups != nil {
+			old, _ = pgroups[name].(map[string]any)
+		}
+		if v, _ := def["upstream_url"].(string); strings.TrimSpace(v) == "" {
+			if old != nil {
+				if ov, _ := old["upstream_url"].(string); strings.TrimSpace(ov) != "" {
+					def["upstream_url"] = strings.TrimSpace(ov)
+				}
+			}
+		}
+		if v, _ := def["upstream_url"].(string); strings.TrimSpace(v) == "" {
+			def["upstream_url"] = qwenwork.BaseURL
+		}
+		if v, _ := def["upstream_type"].(string); strings.TrimSpace(v) == "" {
+			def["upstream_type"] = "qwenwork"
+		}
+		if _, ok := def["accounts"]; !ok && old != nil {
+			if accs, ok2 := old["accounts"]; ok2 {
+				def["accounts"] = accs
+			}
+		}
+	}
+}

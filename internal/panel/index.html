@@ -1114,6 +1114,12 @@ select.grp-sel { max-width: 130px; }
             </div>
             <div class="fld"><span class="lb">已授权账号</span>
               <div id="chQwenAccounts" class="ch-models"></div></div>
+            <div class="fld"><span class="lb">直接粘贴令牌（设备授权的备用通道）</span>
+              <textarea id="chQwenToken" rows="2" placeholder="access_token（粘贴后点右边按钮校验并保存）"></textarea>
+              <input id="chQwenRefresh" placeholder="refresh_token（可选，用于自动续期）" autocomplete="off">
+              <button type="button" class="xs" data-act="qw-acc-add">添加令牌</button>
+              <span class="hint" id="chQwenTokenNote">浏览器授权走不通时用这个：服务端会先打一次上游校验，令牌无效会当场报上游原话</span>
+            </div>
             <div class="fld">
               <button type="button" class="xs" id="chQwenModelsBtn" data-act="qw-fetch-models">拉取千问办公模型</button>
               <span class="hint" id="chQwenModelsNote">从千问办公的模型目录拉当前可用模型（点一个加入白名单）</span>

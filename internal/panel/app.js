@@ -3276,6 +3276,33 @@ async function qwDeviceStart() {
     qwNote('生成失败：' + e.message);
   }
 }
+// qwAddAccount 手工粘贴令牌：服务端校验通过才落库，失败把上游原话显示出来。
+async function qwAddAccount() {
+  const name = chEditState.name;
+  if (!name) { qwNote('先保存渠道，再添加令牌'); return; }
+  const token = String(($('chQwenToken') || {}).value || '').trim();
+  if (!token) { qwNote('先粘贴 access_token'); $('chQwenToken').focus(); return; }
+  const note = $('chQwenTokenNote');
+  note.textContent = '正在校验令牌…';
+  try {
+    const r = await api('channels/qwenwork/account_add', {
+      method: 'POST',
+      body: JSON.stringify({
+        channel: name,
+        access_token: token,
+        refresh_token: String(($('chQwenRefresh') || {}).value || '').trim(),
+      }),
+    });
+    const a = (r && r.account) || {};
+    $('chQwenToken').value = '';
+    $('chQwenRefresh').value = '';
+    note.textContent = '已添加：' + (a.nickname || a.email || a.uid || '账号');
+    await qwReloadAccounts(name);
+    toast('千问办公账号已添加', 'ok');
+  } catch (e) {
+    note.textContent = '添加失败：' + e.message;
+  }
+}
 async function qwRemoveAccount(index) {
   const name = chEditState.name;
   if (!name) return;
@@ -3648,6 +3675,7 @@ document.addEventListener('click', ev => {
   if (act === 'chfetch-models') { chEditFetchModels(); return; }
   if (act === 'qw-device') { qwDeviceStart(); return; }
   if (act === 'qw-fetch-models') { qwFetchModels(); return; }
+  if (act === 'qw-acc-add') { qwAddAccount(); return; }
   if (act === 'qw-acc-del') { qwRemoveAccount(Number(b.dataset.i)); return; }
   if (act === 'qwmodel-toggle') { qwToggleModel(b.dataset.m); return; }
   if (act === 'chtest-upstream') { chEditTestUpstream(); return; }
