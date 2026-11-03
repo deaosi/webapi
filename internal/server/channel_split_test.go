@@ -153,14 +153,14 @@ func TestQwenworkAliasesExposed(t *testing.T) {
 	for _, id := range got {
 		set[id] = true
 	}
-	for _, want := range []string{"qwen3.8-max", "max", "auto", "advanced", "lite"} {
+	for _, want := range []string{"qwen3.8-max", "max", "qwen3.8-flash", "auto", "advanced", "lite"} {
 		if !set[want] {
 			t.Fatalf("别名 %q 应并入渠道模型集，实得 %v", want, got)
 		}
 	}
 	// 原模型不能被别名顶掉，也不能重复。
-	if len(got) != 8 {
-		t.Fatalf("期望 3 个真实模型 + 5 个别名，实得 %d 个：%v", len(got), got)
+	if len(got) != 9 {
+		t.Fatalf("期望 3 个真实模型 + 6 个别名，实得 %d 个：%v", len(got), got)
 	}
 
 	// 目标模型不存在时不补别名（避免暴露一个必然失败的名字）。

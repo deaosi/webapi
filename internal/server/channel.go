@@ -161,6 +161,7 @@ func excludePoolModels(ids, poolBare []string) []string {
 var qwenworkAliasOrder = []struct{ alias, target string }{
 	{"qwen3.8-max", "qwen3.8-max-preview"},
 	{"max", "qwen3.8-max-preview"},
+	{"qwen3.8-flash", "flash"},
 	{"auto", "pro"},
 	{"advanced", "pro"},
 	{"lite", "flash"},

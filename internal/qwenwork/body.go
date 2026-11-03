@@ -23,7 +23,7 @@ func MapModel(name string) string {
 	switch strings.TrimSpace(name) {
 	case "", "auto", "advanced", "pro":
 		return "pro"
-	case "lite", "flash":
+	case "lite", "flash", "qwen3.8-flash":
 		return "flash"
 	case "max", "qwen3.8-max", "qwen3.8-max-preview":
 		return "qwen3.8-max-preview"
