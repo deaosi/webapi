@@ -77,6 +77,11 @@ type Config struct {
 	// ChannelStatus 返回上游渠道定义的快照（定义 + 绑定明细，/status channels 段用）；
 	// nil 时透出空段（渠道功能关闭）。比 ChannelOfKey 多一个维度：绑定的"未命中"标注。
 	ChannelStatus func() any
+
+	// ChannelModelOwner 反查"某个模型归哪个上游渠道"（只读；nil = 不反查）。
+	// 只有一个用途：未绑定渠道的密钥请求渠道专有模型时，把 503「无可用账号」
+	// 换成一条能照着做的 403——告诉运维该把这个密钥绑到哪个渠道。
+	ChannelModelOwner func(bareModel string) (label string, ok bool)
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -629,8 +634,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 上游渠道（NewAPI 口径）：key → 分组 → 渠道账号。未绑定 / 功能关闭 = 不限制（现状）。
 	// 三重校验都**直接拒绝**、不静默回落（回落 = 越权用别组账号/用未授权模型）。
 	channelScope := ""
+	channelBound := false
 	if h.cfg.ChannelOfKey != nil && keyID != "" {
 		if ch, bound := h.cfg.ChannelOfKey(keyID); bound {
+			channelBound = true
 			if !ch.Enabled {
 				writeOpenAIError(w, http.StatusForbidden, "channel_disabled",
 					"the upstream channel bound to this API key is disabled")
@@ -1170,6 +1177,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
 			msg = s
+		}
+	}
+	// 未绑定渠道的密钥请求「只存在于上游渠道」的模型：默认会落到账号池并报 503
+	// no_healthy_account，看着像"上游挂了"。这里直接 403 并点名该绑哪个渠道——
+	// 语义上也正是"只有绑定密钥才能用上游模型"，错误信息本身就是操作指引。
+	if !channelBound && h.cfg.ChannelModelOwner != nil {
+		if label, ok := h.cfg.ChannelModelOwner(bareModel); ok {
+			writeOpenAIErrorHint(w, http.StatusForbidden, "model_not_allowed",
+				"model "+bareModel+" is only served by upstream channel \""+label+
+					"\" and this API key is not bound to it",
+				"该模型属于上游渠道「"+label+"」。请到面板「上游渠道 → 密钥绑定」把当前密钥绑到该渠道；未绑定的密钥只能使用账号池模型。")
+			st.status = http.StatusForbidden
+			st.outcome = reqlog.OutcomeHTTPError
+			return
 		}
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)

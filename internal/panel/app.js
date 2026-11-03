@@ -13,7 +13,7 @@ const apiKeyState = {
 
 // chState 渠道页状态：声明显式提前到顶层 go() 之前（const TDZ——开局 hash 如果是
 // #channels，顶层 go() 在文件求值中途就会调 loadChannels，滞后声明直接炸）。
-const chState = { defs: {}, keys: {}, enabled: true, keyList: [], members: {}, route: {}, dirty: false, loaded: false };
+const chState = { defs: {}, keys: {}, enabled: true, keyList: [], members: {}, route: {}, tab: 'pool', dirty: false, loaded: false };
 // zenState 同理提前：zen 视图是面板内的一等视图，开局 hash 就是 #zen 时顶层 go()
 // 会立刻调 loadZen，声明放文件后半段会炸 TDZ。
 const zenState = { loaded: false, busy: false, data: null };
@@ -193,14 +193,15 @@ $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKe
 const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', apikeys: 'API 密钥', channels: '上游渠道', zen: 'Zen 通道', config: '配置', logs: '运行日志' };
 function go(v) {
   if (v !== 'apikeys' && apiKeyState.modalOpen) closeAPIKeyModal(false);
+  // 旧书签 #zen 兼容：Zen 已并入「上游渠道」的 Zen 分页，不再是独立视图。
+  if (v === 'zen') { chState.tab = 'zen'; v = 'channels'; }
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'apikeys') loadAPIKeys();
-  if (v === 'channels') loadChannels();
-  if (v === 'zen') loadZen();
+  if (v === 'channels') { setChTab(chState.tab); loadChannels(); }
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
@@ -2918,6 +2919,17 @@ function channelMemberNames(group) {
 
 function chModelListText(models) { return (models || []).join(', '); }
 
+// setChTab 切换「上游渠道」页内的四个分页。每种渠道类型一个分页：账号池渠道、
+// OpenAI 兼容上游、Zen 旁路通道、密钥绑定。Zen 分页才按需拉取侧车状态。
+function setChTab(tab) {
+  const tabs = ['pool', 'openai', 'zen', 'keys'];
+  if (tabs.indexOf(tab) < 0) tab = 'pool';
+  chState.tab = tab;
+  document.querySelectorAll('#chTabs .chtab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  document.querySelectorAll('.chpane').forEach(p => { p.hidden = p.id !== 'chpane-' + tab; });
+  if (tab === 'zen') loadZen();
+}
+
 function renderChannels() {
   const names = chGroupNames();
   $('chEnabled').checked = !!chState.enabled;
@@ -2925,63 +2937,67 @@ function renderChannels() {
     ? ('共 ' + names.length + ' 个渠道定义 · ' + Object.keys(chState.keys).length + ' 条密钥绑定')
     : '正在加载…';
 
-  // 渠道定义表（只读 + 编辑/删除；新建编辑走弹窗 chEditModal）
-  $('chGroupBody').innerHTML = names.length ? names.map(n => {
+  const isExtOf = d => !!(d && d.upstream_url);
+  const poolNames = names.filter(n => !isExtOf(chState.defs[n]));
+  const extNames = names.filter(n => isExtOf(chState.defs[n]));
+
+  // ① 账号池渠道：分组 + 成员 + 池内路由权重
+  $('chPoolBody').innerHTML = poolNames.length ? poolNames.map(n => {
     const d = chState.defs[n] || {};
     const members = channelMemberNames(n);
     const enabled = d.enabled !== false;
-    const isExt = !!(d.upstream_url);
-    // 成员列：外部上游渠道**不需要**成员账号（请求直接转发到上游端点，不进账号池），
-    // 所以这里既不显示数量也不打"无成员"警告——那会让人以为"得先去账号池塞几个号"。
-    const mTag = isExt
-      ? '<span class="note" title="外部上游渠道直接转发，不使用账号池">—</span>'
-      : (members.length
-        ? '<span class="tag ok">' + members.length + ' 个</span>'
-        : '<span class="tag warn">无成员</span>');
-    const eTag = enabled ? '' : ' <span class="tag bad">停用</span>';
-    const wl = chModelListText(d.models);
+    const mTag = members.length
+      ? '<span class="tag ok">' + members.length + ' 个</span>'
+      : '<span class="tag warn">无成员</span>';
     const rt = chState.route[n] || {};
-    const kindTag = isExt ? '<span class="tag ok">外部上游</span>' : '<span class="tag">账号池</span>';
-    const urlCell = isExt
-      ? '<span class="id" title="' + esc(d.upstream_url) + '">' + esc(String(d.upstream_url).replace(/^https?:\/\//i, '')) + '</span>'
-      : '<span class="note">—</span>';
-    return '<tr title="' + (isExt ? '上游：' + esc(d.upstream_url) : '成员：' + esc(members.join('、') || '（无）')) + '">' +
+    const wl = chModelListText(d.models);
+    return '<tr title="成员：' + esc(members.join('、') || '（无）') + '">' +
       '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div></td>' +
-      '<td>' + kindTag + '</td>' +
-      '<td>' + urlCell + '</td>' +
-      '<td>' + ((isExt ? '' : (d.realm || '') === '' ? '<span class="note">（不限）</span>' : esc(d.realm)) || '<span class="note">—</span>') + '</td>' +
+      '<td>' + ((d.realm || '') === '' ? '<span class="note">（不限）</span>' : esc(d.realm)) + '</td>' +
       '<td>' + (wl ? esc(wl) : '<span class="note">（不限）</span>') + '</td>' +
-      // 优先级/权重只对账号池渠道有效（同 priority 多分组按权重分流）。外部渠道独占
-      // 整条 key，这两项不参与任何决策——显示 0/1 会被误读成"配了但不生效"，直接给 —。
-      '<td class="num">' + (isExt ? '<span class="note">—</span>' : (rt.priority != null ? rt.priority : 0)) + '</td>' +
-      '<td class="num">' + (isExt ? '<span class="note">—</span>' : (rt.weight != null ? rt.weight : 1)) + '</td>' +
       '<td>' + mTag + '</td>' +
-      '<td><span class="tag ' + (enabled ? 'ok">启用' : 'bad">停用') + '</span>' + eTag + '</td>' +
+      '<td class="num">' + (rt.priority != null ? rt.priority : 0) + '</td>' +
+      '<td class="num">' + (rt.weight != null ? rt.weight : 1) + '</td>' +
+      '<td><span class="tag ' + (enabled ? 'ok">启用' : 'bad">停用') + '</span></td>' +
       '<td><button class="xs ghost" data-act="ch-edit" data-g="' + esc(n) + '">编辑</button> ' +
       '<button class="xs ghost danger" data-act="ch-del" data-g="' + esc(n) + '">删除</button></td></tr>';
-  }).join('') : '<tr><td colspan="9"><div class="empty">还没有渠道。点「新增渠道」创建：外部上游（填地址+密钥）或账号池分组。' +
-      '再到账号池把账号归入该分组。</div></td></tr>';
+  }).join('') : '<tr><td colspan="8"><div class="empty">还没有账号池渠道。点「新增账号池渠道」创建，' +
+      '再到「账号池」页把账号归入该分组。</div></td></tr>';
 
-  // 密钥绑定表（只读生效列 + 绑定按钮走弹窗；下拉选择走独立 saveKeyGroup 单次入库）
+  // ② OpenAI 兼容上游：外部端点，没有成员账号概念
+  $('chExtBody').innerHTML = extNames.length ? extNames.map(n => {
+    const d = chState.defs[n] || {};
+    const enabled = d.enabled !== false;
+    const wl = (d.models || []).length;
+    const url = String(d.upstream_url || '');
+    const host = url.replace(/^https?:\/\//i, '');
+    return '<tr title="上游：' + esc(url) + '">' +
+      '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div></td>' +
+      '<td><span class="id" title="' + esc(url) + '">' + esc(host) + '</span></td>' +
+      '<td>' + (wl ? esc(chModelListText(d.models)) : '<span class="note">（自动：上游全部模型）</span>') + '</td>' +
+      '<td><span class="tag ' + (enabled ? 'ok">启用' : 'bad">停用') + '</span></td>' +
+      '<td><button class="xs ghost" data-act="ch-edit" data-g="' + esc(n) + '">编辑</button> ' +
+      '<button class="xs ghost danger" data-act="ch-del" data-g="' + esc(n) + '">删除</button></td></tr>';
+  }).join('') : '<tr><td colspan="5"><div class="empty">还没有 OpenAI 兼容上游。点「新增 OpenAI 上游」' +
+      '填请求地址和上游 API Key。</div></td></tr>';
+
+  // ④ 密钥绑定表（只读生效列 + 绑定按钮走弹窗）
   const keys = chState.keyList;
   $('chKeyBody').innerHTML = keys.length ? keys.map(k => {
     const bound = chState.keys[k.id] || '';
     let eff;
     if (!bound) {
-      eff = chState.enabled ? '<span class="note">全池可用（未绑定）</span>' : '<span class="note">渠道隔离已关闭</span>';
+      eff = chState.enabled
+        ? '<span class="note">仅账号池模型（未绑定）</span>'
+        : '<span class="note">渠道隔离已关闭</span>';
     } else if (!chState.defs[bound]) {
-      eff = '<span class="tag bad">分组未定义</span>';
+      eff = '<span class="tag bad">渠道未定义</span>';
     } else if (chState.defs[bound].enabled === false) {
       eff = '<span class="tag bad">渠道已停用 → 请求 403</span>';
     } else if (chState.defs[bound].upstream_url) {
-      // 外部上游渠道：生效条件与账号池无关——请求直接转发到该端点。
-      // 命中白名单的模型走上游，其余回落账号池（两组模型都能用）。
       const url = esc(chState.defs[bound].upstream_url);
       const host = esc(String(chState.defs[bound].upstream_url).replace(/^https?:\/\//i, ''));
       const wl = (chState.defs[bound].models || []).length;
-      // 空白名单 = 自动取上游提供的全部模型（渠道模型 = 上游模型表）：
-      // 上游有的模型走上游，只有账号池有的模型回落账号池，两边都能用。
-      // 填了白名单则只让白名单里的走上游（更精确的收窄）。
       eff = wl
         ? '<span class="tag ok" title="请求转发到 ' + url +
           '；未命中白名单的模型回落账号池">外部上游 ' + host + ' · ' + wl + ' 项模型走上游</span>'
@@ -2998,7 +3014,7 @@ function renderChannels() {
       '<td class="who"><div class="nm">' + esc(k.name || '（未命名）') +
         (disabled ? ' <span class="tag bad">已禁用</span>' : '') + '</div></td>' +
       '<td class="who"><div class="id">' + esc(k.prefix || '') + '…</div></td>' +
-      '<td>' + (bound ? esc(bound) : '<span class="note">（不限制）</span>') + '</td>' +
+      '<td>' + (bound ? esc(bound) : '<span class="note">（未绑定）</span>') + '</td>' +
       '<td>' + eff + ' <button class="xs ghost" data-act="key-bind" data-id="' + esc(k.id) + '">绑定</button></td></tr>';
   }).join('') : '<tr><td colspan="4"><div class="empty">还没有调用密钥。先到「API 密钥」页创建。</div></td></tr>';
 }
@@ -3063,14 +3079,17 @@ function keyBindErr(msg) {
   const el = $('keyBindModalError');
   el.textContent = msg; el.hidden = !msg;
 }
-function chEditModal(mode, name) {
+function chEditModal(mode, name, kind) {
   if (!chState.loaded) return;
   const row = mode === 'edit' ? (chState.defs[name] || null) : null;
   if (mode === 'edit' && !row) { toast('渠道不存在，可能已被其他窗口删除', 'err'); loadChannels(); return; }
   chEditState.mode = mode; chEditState.name = mode === 'edit' ? name : '';
   chEditState.modalOpen = true; chEditState.saving = false;
   chEditState.opener = document.activeElement;
-  $('chEditTitle').textContent = mode === 'create' ? '新增渠道' : '编辑渠道「' + name + '」';
+  const wantExt = mode === 'create' && kind === 'openai';
+  $('chEditTitle').textContent = mode === 'create'
+    ? (wantExt ? '新增 OpenAI 兼容上游' : '新增账号池渠道')
+    : '编辑渠道「' + name + '」';
   const nm = $('chEditName');
   nm.disabled = mode === 'edit';
   nm.value = mode === 'edit' ? name : suggestChannelName();
@@ -3079,7 +3098,7 @@ function chEditModal(mode, name) {
   $('chEditModels').value = chModelListText((row && row.models) || []);
   $('chEditEnabled').checked = !row || row.enabled !== false;
   // 上游接入：外部渠道填了 upstream_url，账号池渠道为空。kind 决定显示哪一组字段。
-  const isExt = !!(row && row.upstream_url);
+  const isExt = mode === 'edit' ? !!(row && row.upstream_url) : wantExt;
   $('chEditKind').value = isExt ? 'external' : 'pool';
   $('chEditUpstreamURL').value = (row && row.upstream_url) || '';
   // 编辑时密钥框不回填明文（只留占位提示"已保存，留空即不修改"），避免页面长期驻留上游密钥。
@@ -3316,7 +3335,7 @@ async function chEditSubmit() {
     const isExt = String($('chEditKind').value || '') === 'external';
     // 外部渠道清空 realm：它的"域"由上游地址决定，留着上次账号池时代的残值只会
     // 让人以为它还生效（面板已隐藏该字段，后端也按类型跳过校验，这里把数据也弄干净）。
-    const def = { label, realm: isExt ? '' : realm, models, enabled };
+    const def = { type: isExt ? 'openai' : 'pool', label, realm: isExt ? '' : realm, models, enabled };
     if (isExt) {
       const url = String($('chEditUpstreamURL').value || '').trim();
       const key = String($('chEditUpstreamKey').value || '');
@@ -3370,7 +3389,7 @@ function keyBindModal(id) {
   keyBindState.opener = document.activeElement;
   $('keyBindTitle').textContent = '绑定密钥「' + (k.name || k.prefix || id.slice(0, 8)) + '」';
   const cur = chState.keys[id] || '';
-  $('keyBindSel').innerHTML = '<option value="">（不限制，全池可用）</option>' + chGroupNames().map(n => {
+  $('keyBindSel').innerHTML = '<option value="">（不绑定，仅账号池模型）</option>' + chGroupNames().map(n => {
     const def = chState.defs[n] || {};
     const kind = def.upstream_url ? '外部上游' : '账号池';
     return '<option value="' + esc(n) + '"' + (cur === n ? ' selected' : '') + '>' +
@@ -3382,7 +3401,7 @@ function keyBindModal(id) {
       ? '当前绑定到外部上游「' + cur + '」：请求直接转发到 ' + curDef.upstream_url +
         '（不需要账号池成员），未命中白名单的模型回落账号池。'
       : '当前绑定到账号池渠道「' + cur + '」：只走同组账号；改选即切换，选"不限制"即解绑。')
-    : '未绑定：该密钥全池可用。选一个渠道即按该渠道路由'
+    : '未绑定：该密钥只能用账号池模型，看不到渠道模型。选一个渠道即按该渠道路由'
       + '（外部上游看白名单分流，账号池分组只走同组账号）。';
   keyBindErr('');
   $('keyBindSave').disabled = false; $('keyBindSave').textContent = '保存';
@@ -3444,7 +3463,6 @@ async function saveChannelsEnabled() {
 }
 $('btnChSave').onclick = saveChannelsEnabled;
 $('btnChReload').onclick = loadChannels;
-$('btnChGroupAdd').onclick = () => { chEditModal('create'); };
 document.addEventListener('click', ev => {
   const veil = ev.target;
   if (veil === $('chEditVeil')) { closeChEditModal(); return; }
@@ -3454,6 +3472,8 @@ document.addEventListener('click', ev => {
   const b = veil.closest && veil.closest('[data-act]');
   if (!b || b.disabled) return;
   const act = b.dataset.act;
+  if (act === 'chtab') { setChTab(b.dataset.tab); return; }
+  if (act === 'ch-add') { chEditModal('create', '', b.dataset.kind); return; }
   if (act === 'ch-edit') { chEditModal('edit', b.dataset.g); return; }
   if (act === 'ch-del') { chDelete(b.dataset.g); return; }
   if (act === 'key-bind') { keyBindModal(b.dataset.id); return; }

@@ -25,6 +25,10 @@ import (
 
 // ChannelDef 单个渠道定义（config.channels.groups 的值）。
 type ChannelDef struct {
+	// Type 渠道类型："pool"（账号池分组）/ "openai"（OpenAI 兼容上游）。
+	// 空值按 UpstreamURL 推断（有地址 = openai，无地址 = pool），兼容早期配置。
+	// 面板按这个字段分页：每种渠道一个独立分页，各页只显示自己那类。
+	Type string `json:"type,omitempty"`
 	// Label 展示名（面板用，不参与路由）。
 	Label string `json:"label"`
 	// Realm 上游域："" = 不限制；"cn"/"global" = 该 key 只能走这个域
@@ -107,7 +111,24 @@ func normalizeChannels(ch *Channels) error {
 		//   - upstream_type 目前只允许 openai / 空（避免填错协议却静默按 openai 转发）。
 		def.UpstreamURL = strings.TrimSpace(def.UpstreamURL)
 		def.UpstreamType = strings.TrimSpace(def.UpstreamType)
-		if def.UpstreamURL != "" {
+		def.Type = strings.TrimSpace(def.Type)
+		if def.Type == "" {
+			// 旧配置没有 type：有地址就是外部上游，没地址就是账号池分组。
+			if def.UpstreamURL != "" {
+				def.Type = "openai"
+			} else {
+				def.Type = "pool"
+			}
+		}
+		switch def.Type {
+		case "pool":
+			if def.UpstreamURL != "" {
+				return fmt.Errorf("channels.groups[%q]: 账号池渠道不能填 upstream_url（要接外部上游请把 type 设为 openai）", name)
+			}
+		case "openai":
+			if def.UpstreamURL == "" {
+				return fmt.Errorf("channels.groups[%q].upstream_url: OpenAI 兼容渠道必须填写请求地址", name)
+			}
 			if !strings.HasPrefix(def.UpstreamURL, "http://") && !strings.HasPrefix(def.UpstreamURL, "https://") {
 				return fmt.Errorf("channels.groups[%q].upstream_url: 必须以 http:// 或 https:// 开头", name)
 			}
@@ -117,11 +138,14 @@ func normalizeChannels(ch *Channels) error {
 			if strings.TrimSpace(def.UpstreamKey) == "" {
 				return fmt.Errorf("channels.groups[%q].upstream_key: 外部上游渠道必须填写上游密钥", name)
 			}
-		}
-		switch def.UpstreamType {
-		case "", "openai":
+			if def.UpstreamType == "" {
+				def.UpstreamType = "openai"
+			}
+			if def.UpstreamType != "openai" {
+				return fmt.Errorf("channels.groups[%q].upstream_type: %q 非法（openai）", name, def.UpstreamType)
+			}
 		default:
-			return fmt.Errorf("channels.groups[%q].upstream_type: %q 非法（openai / 空）", name, def.UpstreamType)
+			return fmt.Errorf("channels.groups[%q].type: %q 非法（pool / openai）", name, def.Type)
 		}
 		ch.Groups[name] = def
 	}
@@ -190,6 +214,51 @@ func (r *channelRouter) defByName(name string) (ChannelDef, bool) {
 	return def, ok
 }
 
+// OwnerOfModel 反查该模型归哪个启用的上游渠道（未绑定密钥的 403 提示用）。
+//
+// 只看外部渠道：账号池模型的"归属"就是池子本身，不需要提示绑定。按渠道名排序遍历，
+// 保证同样的配置永远给出同一个提示。poolBare 传 nil——这里问的是"这个渠道能不能
+// 服务这个模型"，与池子里有没有同名模型无关（白名单留空的渠道按上游全表算）。
+func (r *channelRouter) OwnerOfModel(bare string) (string, bool) {
+	if r == nil || strings.TrimSpace(bare) == "" {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.last == nil || !r.enabled {
+		return "", false
+	}
+	names := make([]string, 0, len(r.last.Groups))
+	for name := range r.last.Groups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		def := r.last.Groups[name]
+		if !def.EnabledOn() || !def.IsExternal() {
+			continue
+		}
+		info := server.ChannelInfo{
+			Group:       name,
+			Type:        def.Type,
+			Label:       def.Label,
+			Realm:       def.Realm,
+			Models:      def.Models,
+			Enabled:     true,
+			UpstreamURL: def.UpstreamURL,
+			UpstreamKey: def.UpstreamKey,
+		}
+		if !server.ChannelServesModel(info, bare, nil) {
+			continue
+		}
+		if label := strings.TrimSpace(def.Label); label != "" {
+			return label, true
+		}
+		return name, true
+	}
+	return "", false
+}
+
 func newChannelRouter(ch *Channels, store *apikeys.Store) *channelRouter {
 	r := &channelRouter{store: store}
 	r.Set(ch)
@@ -216,6 +285,7 @@ func (r *channelRouter) Set(ch *Channels) {
 			}
 			info := server.ChannelInfo{
 				Group:       group,
+				Type:        def.Type,
 				Label:       def.Label,
 				Realm:       def.Realm,
 				Models:      def.Models,
@@ -352,6 +422,7 @@ type channelStatus struct {
 // channelStatusDef 渠道定义的状态透出形态：与 ChannelDef 同构，但**上游密钥脱敏**
 // （只留长度与尾 4 位）。/status 是运维观测面，不该成为上游密钥的泄露口。
 type channelStatusDef struct {
+	Type        string   `json:"type"`
 	Label       string   `json:"label"`
 	Realm       string   `json:"realm"`
 	Models      []string `json:"models"`
@@ -367,6 +438,7 @@ func (d ChannelDef) statusView() channelStatusDef {
 		key = "***" + d.UpstreamKey[max(0, len(d.UpstreamKey)-4):] + "(len=" + itoa(len(d.UpstreamKey)) + ")"
 	}
 	return channelStatusDef{
+		Type:        d.Type,
 		Label:       d.Label,
 		Realm:       d.Realm,
 		Models:      d.Models,

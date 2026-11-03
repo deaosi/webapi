@@ -20,6 +20,9 @@ import "strings"
 type ChannelInfo struct {
 	// Group 账号分组名：渠道成员 = pool.accounts[u].group == Group 的账号。
 	Group string
+	// Type 渠道类型："pool"（账号池分组）/ "openai"（OpenAI 兼容上游）。
+	// 空值按 UpstreamURL 推断，兼容早期只写了地址的配置。
+	Type string
 	// Label 展示名（面板与错误文案用；不参与路由）。
 	Label string
 	// Realm 上游域（"" = 不限制；"cn"/"global" = 强制）。裸模型名采用该值，
@@ -39,6 +42,20 @@ type ChannelInfo struct {
 
 // IsExternal 该渠道是否为外部上游端点（填了 UpstreamURL）。
 func (c ChannelInfo) IsExternal() bool { return strings.TrimSpace(c.UpstreamURL) != "" }
+
+// KindLabel 渠道类型的中文名（错误文案用）。
+func (c ChannelInfo) KindLabel() string {
+	switch strings.TrimSpace(c.Type) {
+	case "openai":
+		return "OpenAI 兼容上游"
+	case "qwenwork":
+		return "千问办公"
+	}
+	if c.IsExternal() {
+		return "上游渠道"
+	}
+	return "账号池渠道"
+}
 
 // ChannelResolver 解析调用密钥所属渠道。ok=false 表示该 key 未绑定渠道
 // （不限制，主密钥与未绑定 key 走这条）。nil = 渠道功能整体关闭。

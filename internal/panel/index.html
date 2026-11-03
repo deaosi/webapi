@@ -197,6 +197,17 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .box > header .note { color: var(--ink-3); font-size: 12px; }
 .box .pad { padding: 17px; }
 
+/* 上游渠道：按渠道类型分页 */
+.chtabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; margin-bottom: 14px; flex-wrap: wrap; }
+.chtabs .chtab { padding: 5px 15px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
+.chtabs .chtab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+.chbar { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
+.chbar .ak-note { flex: 1; margin: 0; }
+.chpane .subbox { border: 1px solid var(--line-soft); border-radius: 10px; margin-top: 14px; overflow: hidden; }
+.chpane .subbox > header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line-soft); }
+.chpane .subbox > header h4 { font-size: 12.5px; font-weight: 600; }
+
+
 /* ── 账号表（签名元素：健康色条 + 积分量条）───────────────────────── */
 .tbl-wrap { overflow-x: auto; }
 .acc { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 640px; }
@@ -530,10 +541,6 @@ select.grp-sel { max-width: 130px; }
       <li><a href="#channels" data-view="channels">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4.2h12M2 8h12M2 11.8h12"/><circle cx="5" cy="4.2" r="1.6"/><circle cx="10.5" cy="11.8" r="1.6"/></svg>
         上游渠道</a></li>
-      <li><a href="#zen" data-view="zen"
-        title="OpenCode Zen 免费通道：模型目录 / 冷却 / 转发与并发统计">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.3 8h3.4"/><path d="M5.7 8 9 4.6h4.4"/><path d="M5.7 8 9 11.4h4.4"/></svg>
-        Zen 通道</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
@@ -946,7 +953,7 @@ select.grp-sel { max-width: 130px; }
       </div>
     </section>
 
-    <!-- 上游渠道 -->
+    <!-- 上游渠道（按渠道类型分页：账号池 / OpenAI 兼容 / Zen / 密钥绑定） -->
     <section class="view" id="view-channels" hidden>
       <div class="box">
         <header>
@@ -958,28 +965,78 @@ select.grp-sel { max-width: 130px; }
         <div class="pad">
           <div class="switch"><span class="lb">启用渠道隔离</span>
             <input type="checkbox" id="chEnabled"></div>
-          <p class="ak-note">渠道 = 一个账号分组 + 该组的上游属性（上游域 / 模型白名单 / 启停）。
-            成员账号在<strong>账号池</strong>页的「分组」列指定；绑定了分组的密钥<strong>只能</strong>用同组账号，
-            组内无可用即返回错误，<strong>不会</strong>借用其他分组的账号。未绑定分组的密钥不受限制。</p>
-          <p class="ak-note"><strong>生效路径说明</strong>：渠道分组只在<strong>经过网关鉴权（`withAPIAuth`）能看到调用密钥 ID 的入口</strong>生效，
-            即直连 panel 的 <code>/v1/*</code>（公网经 Caddy 的同路径亦可）。<code>/adapter/v1/*</code> 目前把上游身份统一换成主密钥，
-            绑定在该路径上视同未绑定——这是已知限制，跨路径透传调用密钥需要单独的鉴权改造。</p>
-          <div class="hr"></div>
-          <h4 class="sub-h">渠道定义 <span class="hint">渠道 = 一个账号分组 + 它的上游属性与路由权重；成员账号在「账号池」页归组</span>
-            <span class="grow"></span><button class="xs" id="btnChGroupAdd">新增渠道</button></h4>
-          <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>渠道</th><th>类型</th><th>上游地址</th><th>模型白名单</th><th>优先级</th><th>权重</th><th>成员</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
-            <tbody id="chGroupBody"></tbody>
-          </table></div>
-          <div class="hr"></div>
-          <h4 class="sub-h">密钥分组绑定 <span class="hint">每个调用密钥走弹窗绑定一个渠道分组；解绑即全池可用</span></h4>
-          <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>密钥名称</th><th>密钥前缀</th><th>绑定渠道分组</th><th>实际生效</th></tr></thead>
-            <tbody id="chKeyBody"></tbody>
-          </table></div>
-          <p class="ak-note">白名单留空 = 不限模型；支持 <code>glm-5*</code> 这样的前缀通配。上游域留空 = 不限，
-            填 <code>cn</code>/<code>global</code> 时该密钥只能走对应域（显式写错域的模型名会被拒绝）。</p>
-          <div class="ak-error" id="chError" role="status" hidden></div>
+          <div class="chtabs" id="chTabs" role="tablist">
+            <button type="button" class="chtab on" data-act="chtab" data-tab="pool">账号池渠道</button>
+            <button type="button" class="chtab" data-act="chtab" data-tab="openai">OpenAI 兼容</button>
+            <button type="button" class="chtab" data-act="chtab" data-tab="zen">Zen 通道</button>
+            <button type="button" class="chtab" data-act="chtab" data-tab="keys">密钥绑定</button>
+          </div>
+
+          <!-- ① 账号池渠道 -->
+          <div class="chpane" id="chpane-pool">
+            <div class="chbar">
+              <p class="ak-note">账号池渠道 = 把 WorkBuddy 账号按分组隔开。绑定了该渠道的密钥<strong>只能</strong>用组内账号
+                （组内无可用即失败，不跨组借号）；未绑定的密钥走全池。成员账号在「账号池」页的「分组」列指定。</p>
+              <button class="xs primary" data-act="ch-add" data-kind="pool">新增账号池渠道</button>
+            </div>
+            <div class="tbl-wrap"><table class="acc">
+              <thead><tr><th>渠道</th><th>上游域</th><th>模型白名单</th><th>成员账号</th><th>优先级</th><th>权重</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
+              <tbody id="chPoolBody"></tbody>
+            </table></div>
+          </div>
+
+          <!-- ② OpenAI 兼容上游 -->
+          <div class="chpane" id="chpane-openai" hidden>
+            <div class="chbar">
+              <p class="ak-note">OpenAI 兼容上游 = 一个外部端点（请求地址 + 上游密钥）。绑定的密钥命中模型白名单的请求
+                <strong>转发到该上游</strong>，未命中的回落账号池——两组模型可以同时用。</p>
+              <button class="xs primary" data-act="ch-add" data-kind="openai">新增 OpenAI 上游</button>
+            </div>
+            <div class="tbl-wrap"><table class="acc">
+              <thead><tr><th>渠道</th><th>请求地址</th><th>模型</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
+              <tbody id="chExtBody"></tbody>
+            </table></div>
+          </div>
+
+          <!-- ③ Zen 通道（Caddy 层旁路，面板只做监控） -->
+          <div class="chpane" id="chpane-zen" hidden>
+            <p class="ak-note">Zen 是 Caddy 层先截走的旁路通道（模型名写 <code>zen:&lt;模型&gt;</code>），请求不经过面板路由，
+              所以这里只做<strong>监控</strong>：免费通道状态、模型目录、冷却与并发。</p>
+            <div class="stats" id="zenStats"></div>
+            <div class="subbox">
+              <header>
+                <h4>Zen 侧车 <span class="hint" id="zenNote">—</span></h4>
+                <span class="grow"></span>
+                <button class="xs" id="btnZenCatalog" title="让 zen 立即重新拉一次免费模型目录">刷新目录</button>
+                <button class="xs" id="btnZenUnblock" title="清掉 zen 侧全部模型冷却">解除全部冷却</button>
+              </header>
+              <div class="pad">
+                <div class="grid3">
+                  <div class="fld"><span class="lb">Zen 免费通道</span><div id="zenLane" class="note">—</div></div>
+                  <div class="fld"><span class="lb">上游面板</span><div id="zenUp" class="note">—</div></div>
+                  <div class="fld"><span class="lb">并发</span><div id="zenConc" class="note">—</div></div>
+                </div>
+                <div class="hr"></div>
+                <h4 class="sub-h">模型目录 <span class="hint" id="zenModelsNote">用 zen:&lt;模型名&gt; 调用</span></h4>
+                <div class="tbl-wrap"><table class="acc">
+                  <thead><tr><th>模型</th><th>上下文</th><th>输出上限</th><th>成功 / 失败</th><th>token 入 / 出</th><th>并发</th><th>状态</th><th class="c-acts"></th></tr></thead>
+                  <tbody id="zenModels"></tbody>
+                </table></div>
+                <div class="ak-error" id="zenError" role="status" hidden></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ④ 密钥绑定 -->
+          <div class="chpane" id="chpane-keys" hidden>
+            <p class="ak-note"><strong>只有绑定到渠道的密钥才能使用该渠道的上游模型。</strong>
+              未绑定 = 只能看到/调用账号池模型，渠道模型一律不出现。绑定是给这把密钥<strong>增加</strong>一组模型，不是替换账号池。</p>
+            <div class="tbl-wrap"><table class="acc">
+              <thead><tr><th>密钥名称</th><th>密钥前缀</th><th>绑定渠道</th><th>实际生效</th></tr></thead>
+              <tbody id="chKeyBody"></tbody>
+            </table></div>
+            <div class="ak-error" id="chError" role="status" hidden></div>
+          </div>
         </div>
       </div>
     </section>
@@ -1075,37 +1132,6 @@ select.grp-sel { max-width: 130px; }
         </footer>
       </div>
     </div>
-
-    <!-- Zen 通道（旁路网关，OpenCode Zen 免费通道） -->
-    <section class="view" id="view-zen" hidden>
-      <div class="stats" id="zenStats"></div>
-      <div class="box">
-        <header>
-          <h3>Zen 通道 <span class="hint" id="zenNote">旁路网关 · 直接读同源 JSON，无需跳页</span></h3>
-          <span class="grow"></span>
-          <button class="xs" id="btnZenReload">刷新</button>
-          <button class="xs" id="btnZenCatalog" title="让 zen 立即重新拉一次免费模型目录">刷新目录</button>
-          <button class="xs" id="btnZenUnblock" title="清掉 zen 侧全部模型冷却">解除全部冷却</button>
-        </header>
-        <div class="pad">
-          <div class="grid3">
-            <div class="fld"><span class="lb">Zen 免费通道</span><div id="zenLane" class="note">—</div></div>
-            <div class="fld"><span class="lb">上游面板</span><div id="zenUp" class="note">—</div></div>
-            <div class="fld"><span class="lb">并发</span><div id="zenConc" class="note">—</div></div>
-          </div>
-          <div class="hr"></div>
-          <h4 class="sub-h">模型目录 <span class="hint" id="zenModelsNote">用 zen:&lt;模型名&gt; 调用</span></h4>
-          <div class="tbl-wrap"><table class="acc">
-            <thead><tr><th>模型</th><th>上下文</th><th>输出上限</th><th>成功 / 失败</th><th>token 入 / 出</th><th>并发</th><th>状态</th><th class="c-acts"></th></tr></thead>
-            <tbody id="zenModels"></tbody>
-          </table></div>
-          <p class="ak-note">这一页读的是 zen 侧车的同源接口 <code>/zen/panel/api/overview</code>（同一把密钥，zen 也认），
-            所以进来出去都是面板内切页、不重新加载、不用再登录。
-            需要 zen 原始页面的其余功能可以走<a href="/zen/panel" rel="noopener">独立页面</a>。</p>
-          <div class="ak-error" id="zenError" role="status" hidden></div>
-        </div>
-      </div>
-    </section>
 
     <!-- 配置 -->
     <section class="view" id="view-config" hidden>

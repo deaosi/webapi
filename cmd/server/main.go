@@ -407,6 +407,8 @@ func main() {
 		ChannelOfKey: chRouter.Resolve,
 		// channelStatus 返回具体 struct，包一层 any 供 /status channels 段透出。
 		ChannelStatus: func() any { return chRouter.status() },
+		// 未绑定密钥请求渠道专有模型时，用它把 503 换成"该绑哪个渠道"的 403。
+		ChannelModelOwner: chRouter.OwnerOfModel,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
