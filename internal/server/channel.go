@@ -113,7 +113,7 @@ func ChannelModelSet(ch ChannelInfo, poolBare []string) []string {
 		if len(ids) == 0 {
 			return nil
 		}
-		return excludePoolModels(ids, poolBare)
+		return withQwenworkAliases(excludePoolModels(ids, poolBare))
 	}
 	if !ch.IsExternal() {
 		return nil
@@ -146,6 +146,37 @@ func excludePoolModels(ids, poolBare []string) []string {
 	for _, id := range ids {
 		if id = strings.TrimSpace(id); id != "" && !have[id] {
 			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// qwenworkAliasOrder 是「客户端常用名 → 千问办公真实模型键」的固定顺序表，
+// 与 qwenwork.MapModel 的归一化规则保持一致。
+//
+// 为什么要并进模型集：上游模型键只有 pro / flash / qwen3.8-max-preview，但 DSH
+// 等客户端习惯写 qwen3.8-max、max、auto。不做别名并集，这些名字就会被判成
+// 「该渠道不提供此模型」，请求回落账号池后账号侧回 11102 model_blocked，
+// 最终对外变成 503 no_healthy_account——看起来像上游宕机，实际只是名字没对上。
+var qwenworkAliasOrder = []struct{ alias, target string }{
+	{"qwen3.8-max", "qwen3.8-max-preview"},
+	{"max", "qwen3.8-max-preview"},
+	{"auto", "pro"},
+	{"advanced", "pro"},
+	{"lite", "flash"},
+}
+
+// withQwenworkAliases 在已发现的模型集上补别名（目标模型存在时才补），顺序稳定。
+func withQwenworkAliases(ids []string) []string {
+	have := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		have[id] = true
+	}
+	out := append([]string(nil), ids...)
+	for _, a := range qwenworkAliasOrder {
+		if have[a.target] && !have[a.alias] {
+			out = append(out, a.alias)
+			have[a.alias] = true
 		}
 	}
 	return out

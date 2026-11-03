@@ -455,6 +455,24 @@ func (h *Handler) poolModelNames() []string {
 	return out
 }
 
+// poolServesModel 报告账号池目录里是否有这个裸模型名。
+//
+// 用途：绑定外部渠道的 key 请求一个"渠道不提供、池子也没有"的模型时，给出
+// 404 model_not_found 而不是让它落到池子里被逐账号拒绝、最后报 503
+// no_healthy_account（那种错误会误导成上游故障）。
+func (h *Handler) poolServesModel(bare string) bool {
+	bare = strings.TrimSpace(bare)
+	if bare == "" {
+		return false
+	}
+	for _, id := range h.poolModelNames() {
+		if id == bare {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
@@ -681,6 +699,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					} else {
 						proxyToUpstream(w, r, ch, body, bareModel)
 					}
+					return
+				}
+				// 既不在渠道模型集里、池子里也没有这个名字：这是"模型不存在"，
+				// 不是"账号都挂了"。继续往下走会被 6 个账号各回一次 11102
+				// model_blocked，最后对外报 503 no_healthy_account——把"名字写错/
+				// 该渠道不提供"伪装成"上游宕机"，排障时极容易误判（实测踩过）。
+				if !h.poolServesModel(bareModel) {
+					writeOpenAIError(w, http.StatusNotFound, "model_not_found",
+						"model "+bareModel+" is not provided by channel "+ch.logName()+
+							" nor by the account pool; channel models: "+
+							strings.Join(ChannelModelSet(ch, h.poolModelNames()), ", "))
 					return
 				}
 			} else {

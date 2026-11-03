@@ -143,3 +143,31 @@ func TestUpstreamModelCacheKeepsLastGoodOnFailure(t *testing.T) {
 		t.Fatalf("保留的应是与之前相同的内容，实得 %v", got.ids)
 	}
 }
+
+// TestQwenworkAliasesExposed 千问办公的客户端常用名（qwen3.8-max / max / auto…）
+// 必须随真实模型一起并进渠道模型集，否则 DSH 这类写惯 qwen3.8-max 的客户端
+// 会被判成"该渠道不提供此模型"，回落账号池后对外报 503 no_healthy_account。
+func TestQwenworkAliasesExposed(t *testing.T) {
+	got := withQwenworkAliases([]string{"flash", "pro", "qwen3.8-max-preview"})
+	set := map[string]bool{}
+	for _, id := range got {
+		set[id] = true
+	}
+	for _, want := range []string{"qwen3.8-max", "max", "auto", "advanced", "lite"} {
+		if !set[want] {
+			t.Fatalf("别名 %q 应并入渠道模型集，实得 %v", want, got)
+		}
+	}
+	// 原模型不能被别名顶掉，也不能重复。
+	if len(got) != 8 {
+		t.Fatalf("期望 3 个真实模型 + 5 个别名，实得 %d 个：%v", len(got), got)
+	}
+
+	// 目标模型不存在时不补别名（避免暴露一个必然失败的名字）。
+	only := withQwenworkAliases([]string{"pro"})
+	for _, id := range only {
+		if id == "qwen3.8-max" || id == "lite" {
+			t.Fatalf("上游没有对应模型时不该补别名，实得 %v", only)
+		}
+	}
+}
