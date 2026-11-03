@@ -198,7 +198,12 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .box .pad { padding: 17px; }
 
 /* 上游渠道：按渠道类型分页 */
-.chtabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; margin-bottom: 14px; flex-wrap: wrap; }
+  .kblist { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; max-height: 220px; overflow: auto; }
+  .kbchip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; font-size: 13px; }
+  .kbchip.on { border-color: var(--acc); background: rgba(59,130,246,.10); }
+  .kbchip input { margin: 0; }
+  .kbchip .note { font-size: 11px; }
+  .chtabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; margin-bottom: 14px; flex-wrap: wrap; }
 .chtabs .chtab { padding: 5px 15px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
 .chtabs .chtab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
 .chbar { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
@@ -1161,9 +1166,10 @@ select.grp-sel { max-width: 130px; }
       <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="keyBindTitle">
         <header><h3 id="keyBindTitle">绑定密钥</h3><div class="hint" id="keyBindHint"></div></header>
         <div class="body">
-          <label class="fld"><span class="lb">绑定到渠道</span>
-            <select id="keyBindSel"></select>
-            <span class="hint">选「不限制」即解绑，该密钥恢复全池可用</span></label>
+          <div class="fld"><span class="lb">绑定渠道（可多选）</span>
+            <div id="keyBindList" class="kblist"></div>
+            <span class="hint">不勾任何渠道 = 只用账号池模型；勾多个 = <strong>池子 + 这些渠道的模型全部可用</strong>
+              （按勾选顺序先到先用）。解绑就是把勾全部取消。</span></div>
           <div class="state err" id="keyBindModalError" role="status" hidden></div>
         </div>
         <footer><span class="grow"></span>

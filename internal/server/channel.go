@@ -68,6 +68,10 @@ func (c ChannelInfo) KindLabel() string {
 // （不限制，主密钥与未绑定 key 走这条）。nil = 渠道功能整体关闭。
 type ChannelResolver func(keyID string) (ChannelInfo, bool)
 
+// ChannelListResolver 解析调用密钥绑定的**全部**渠道（一个 key 可以绑多个渠道）。
+// ok=false / 空列表 = 未绑定任何渠道，走账号池。nil = 未启用多渠道解析。
+type ChannelListResolver func(keyID string) ([]ChannelInfo, bool)
+
 // FilterChannelModels 按渠道约束（realm + 白名单）裁剪模型列表条目。
 //
 // 与 chatCompletions 的拒绝规则同源：列表里只留该 key 真正能调的模型，客户端就不会

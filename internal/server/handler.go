@@ -74,6 +74,10 @@ type Config struct {
 	// cmd/server 侧从 config.channels 构建（key 支持密钥 ID 或前缀，最长匹配）。
 	ChannelOfKey ChannelResolver
 
+	// ChannelsOfKey 解析调用密钥绑定的**全部**渠道（多渠道绑定）。
+	// 注入时优先于 ChannelOfKey；两者都为 nil = 渠道功能关闭。
+	ChannelsOfKey ChannelListResolver
+
 	// ChannelStatus 返回上游渠道定义的快照（定义 + 绑定明细，/status channels 段用）；
 	// nil 时透出空段（渠道功能关闭）。比 ChannelOfKey 多一个维度：绑定的"未命中"标注。
 	ChannelStatus func() any
@@ -318,6 +322,25 @@ const (
 	modelsFetchFailCooldown = 5 * time.Minute
 )
 
+// boundChannels 返回该调用密钥绑定的全部渠道（按配置顺序，先绑先用）。
+// ChannelsOfKey 未注入时退回单绑定回调 ChannelOfKey（老配置/测试）。
+func (h *Handler) boundChannels(keyID string) []ChannelInfo {
+	if keyID == "" {
+		return nil
+	}
+	if h.cfg.ChannelsOfKey != nil {
+		if list, ok := h.cfg.ChannelsOfKey(keyID); ok && len(list) > 0 {
+			return list
+		}
+	}
+	if h.cfg.ChannelOfKey != nil {
+		if ch, ok := h.cfg.ChannelOfKey(keyID); ok {
+			return []ChannelInfo{ch}
+		}
+	}
+	return nil
+}
+
 // models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
@@ -331,20 +354,53 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	// 先前只列白名单是"独占"语义的产物，会让客户端看不到仍可用的池子模型。
 	// 白名单为空时没有上游模型可加（安全默认：空 = 不接管任何模型），
 	// 列表就是池子目录本身，不需要去探上游。
-	if h.cfg.ChannelOfKey != nil && keyID != "" {
-		if ch, bound := h.cfg.ChannelOfKey(keyID); bound && ch.IsExternal() {
-			list := h.modelList()
-			list = append(list, externalChannelModels(ch, h.poolModelNames())...)
-			writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
-			return
-		}
-	}
 	list := h.modelList()
-	// 渠道约束（realm + 白名单）：只列该 key 真正能调的模型，与 chatCompletions 的
-	// 拒绝规则同源——不然客户端从列表里选到一个必然 403 的名字。
-	if h.cfg.ChannelOfKey != nil && keyID != "" {
-		if ch, bound := h.cfg.ChannelOfKey(keyID); bound {
-			list = FilterChannelModels(list, ch)
+	// 渠道约束：这个 key 能调的模型 = 账号池目录 ∪ 每个已绑渠道承接的模型。
+	//   - 账号池型渠道：按 realm + 白名单收窄池子（多渠道取并集）；
+	//   - 外部渠道：只**追加**它承接的模型，不会顶掉池子里的同名模型。
+	if chs := h.boundChannels(keyID); len(chs) > 0 {
+		var poolChs []ChannelInfo
+		for _, ch := range chs {
+			if ch.Enabled && !ch.IsExternal() {
+				poolChs = append(poolChs, ch)
+			}
+		}
+		if len(poolChs) > 0 {
+			kept := make([]map[string]any, 0, len(list))
+			for _, entry := range list {
+				id, _ := entry["id"].(string)
+				entryRealm, bare := ResolveModel(id)
+				for _, ch := range poolChs {
+					if ch.Realm != "" && entryRealm != ch.Realm {
+						continue
+					}
+					if !ChannelAllowedModel(ch.Models, bare) {
+						continue
+					}
+					kept = append(kept, entry)
+					break
+				}
+			}
+			list = kept
+		}
+		seen := make(map[string]bool, len(list))
+		for _, entry := range list {
+			if id, ok := entry["id"].(string); ok {
+				seen[id] = true
+			}
+		}
+		for _, ch := range chs {
+			if !ch.Enabled || !ch.IsExternal() {
+				continue
+			}
+			for _, entry := range externalChannelModels(ch, h.poolModelNames()) {
+				id, _ := entry["id"].(string)
+				if id == "" || seen[id] {
+					continue
+				}
+				seen[id] = true
+				list = append(list, entry)
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -653,68 +709,92 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 三重校验都**直接拒绝**、不静默回落（回落 = 越权用别组账号/用未授权模型）。
 	channelScope := ""
 	channelBound := false
-	if h.cfg.ChannelOfKey != nil && keyID != "" {
-		if ch, bound := h.cfg.ChannelOfKey(keyID); bound {
-			channelBound = true
+	if chs := h.boundChannels(keyID); len(chs) > 0 {
+		channelBound = true
+		// 逐个绑定判定，语义与单绑定完全一致：
+		//   - 账号池型渠道：realm 冲突 / 不在白名单 → 这个渠道不适用（不立即 403，
+		//     因为可能还绑了别的渠道）；一个都不适用时才报错。
+		//   - 外部渠道：命中模型集 → 转发上游；都不命中 → 回落账号池。
+		var usable []ChannelInfo
+		realmMismatch := ""
+		for _, ch := range chs {
 			if !ch.Enabled {
-				writeOpenAIError(w, http.StatusForbidden, "channel_disabled",
-					"the upstream channel bound to this API key is disabled")
-				return
+				continue
 			}
-			// realm 只对账号池渠道有意义（决定在哪个域选号）。外部上游渠道的"域"
-			// 由上游地址决定，残留的 realm 值不该把请求拦掉。
-			if ch.Realm != "" && !ch.IsExternal() {
-				if realmExplicit && realm != ch.Realm {
-					writeOpenAIError(w, http.StatusForbidden, "channel_realm_mismatch",
-						"model "+peek.Model+" belongs to realm "+realm+
-							" but this API key is limited to "+ch.Realm)
+			if !ch.IsExternal() {
+				if ch.Realm != "" && realmExplicit && realm != ch.Realm {
+					realmMismatch = ch.Realm
+					continue
+				}
+				if !ChannelAllowedModel(ch.Models, bareModel) {
+					continue
+				}
+			}
+			usable = append(usable, ch)
+		}
+		if len(usable) == 0 {
+			for _, ch := range chs {
+				if !ch.Enabled {
+					writeOpenAIError(w, http.StatusForbidden, "channel_disabled",
+						"the upstream channel bound to this API key is disabled")
 					return
 				}
+			}
+			if realmMismatch != "" {
+				writeOpenAIError(w, http.StatusForbidden, "channel_realm_mismatch",
+					"model "+peek.Model+" belongs to realm "+realm+
+						" but this API key is limited to "+realmMismatch)
+				return
+			}
+			writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+				"model "+bareModel+" is not allowed for this API key")
+			return
+		}
+		served := false
+		for _, ch := range usable {
+			if !ch.IsExternal() || !ChannelServesModel(ch, bareModel, h.poolModelNames()) {
+				continue
+			}
+			// 千问办公是独立协议（cosy 签名 + 非 OpenAI 请求体 + 信封 SSE），
+			// 与"原样转发"的 OpenAI 兼容渠道不是一条路。
+			if ch.Type == "qwenwork" {
+				proxyQwenwork(w, r, ch, body, bareModel)
+			} else {
+				proxyToUpstream(w, r, ch, body, bareModel)
+			}
+			served = true
+			break
+		}
+		if served {
+			return
+		}
+		poolBound := false
+		for _, ch := range usable {
+			if ch.IsExternal() {
+				continue
+			}
+			poolBound = true
+			channelScope = ch.Group
+			if ch.Realm != "" {
 				realm = ch.Realm // 裸名采用渠道域（不被缺省 cn 顶掉）
 			}
-			// 白名单的语义**按渠道类型分岔**，不能一律 403：
-			//   - 账号池渠道：硬性放行名单——不匹配即拒绝（该 key 只能调这些池模型）；
-			//   - 外部上游渠道：分流名单——不匹配的含义是"这个模型交给账号池"，
-			//     而不是"禁止使用"。在这里 403 会把池子原有模型整片打死，
-			//     正好废掉"绑定渠道 = 增加一组模型"的设计。
-			if !ch.IsExternal() && !ChannelAllowedModel(ch.Models, bareModel) {
-				writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
-					"model "+bareModel+" is not allowed for this API key")
-				return
+			break
+		}
+		// 绑的全是外部渠道、且没有一个承接这个模型：池子里也没有就是模型名写错。
+		// 继续往下走会被 6 个账号各回一次 11102 model_blocked，最后对外报
+		// 503 no_healthy_account——把"名字写错/该渠道不提供"伪装成"上游宕机"。
+		if !poolBound && !h.poolServesModel(bareModel) {
+			names := make([]string, 0, len(usable))
+			models := make([]string, 0, 16)
+			for _, ch := range usable {
+				names = append(names, ch.logName())
+				models = append(models, ChannelModelSet(ch, h.poolModelNames())...)
 			}
-			// 外部上游渠道：按**模型**分流，而不是整条 key 独占——
-			//   命中该渠道白名单 → 转发到上游端点（不进账号池、不消耗账号积分）；
-			//   未命中           → 回落账号池，池子原有模型照常可用。
-			// 这样"绑定渠道"是给这个 key **增加**一组可用模型，而不是替换掉原有能力。
-			//
-			// 回落时刻意**不设** channelScope：外部渠道是上游端点，没有"池成员分组"
-			// 概念（它的分组名在 pool.groups 里通常没有成员），设了会把回落请求
-			// 逼进一个空分组、直接 no_healthy_account。
-			if ch.IsExternal() {
-				if ChannelServesModel(ch, bareModel, h.poolModelNames()) {
-					// 千问办公是独立协议（cosy 签名 + 非 OpenAI 请求体 + 信封 SSE），
-					// 与"原样转发"的 OpenAI 兼容渠道不是一条路。
-					if ch.Type == "qwenwork" {
-						proxyQwenwork(w, r, ch, body, bareModel)
-					} else {
-						proxyToUpstream(w, r, ch, body, bareModel)
-					}
-					return
-				}
-				// 既不在渠道模型集里、池子里也没有这个名字：这是"模型不存在"，
-				// 不是"账号都挂了"。继续往下走会被 6 个账号各回一次 11102
-				// model_blocked，最后对外报 503 no_healthy_account——把"名字写错/
-				// 该渠道不提供"伪装成"上游宕机"，排障时极容易误判（实测踩过）。
-				if !h.poolServesModel(bareModel) {
-					writeOpenAIError(w, http.StatusNotFound, "model_not_found",
-						"model "+bareModel+" is not provided by channel "+ch.logName()+
-							" nor by the account pool; channel models: "+
-							strings.Join(ChannelModelSet(ch, h.poolModelNames()), ", "))
-					return
-				}
-			} else {
-				channelScope = ch.Group
-			}
+			writeOpenAIError(w, http.StatusNotFound, "model_not_found",
+				"model "+bareModel+" is not provided by channel "+
+					strings.Join(names, " / ")+" nor by the account pool; channel models: "+
+					strings.Join(models, ", "))
+			return
 		}
 	}
 	modelRate := ""

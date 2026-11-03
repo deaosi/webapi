@@ -2915,6 +2915,30 @@ if ($('btnPk')) $('btnPk').onclick = loadPackages;
 
 function chGroupNames() { return Object.keys(chState.defs).sort(); }
 
+// splitBindings 把 "a,b" 形式的绑定拆成数组（空 = 未绑定）。
+function splitBindings(v) {
+  return String(v || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+// chBoundKeys 反查某个渠道被哪些密钥绑定（渠道页的「已绑定 N 个密钥」标识）。
+function chBoundKeys(group) {
+  const out = [];
+  Object.keys(chState.keys || {}).forEach(id => {
+    if (splitBindings(chState.keys[id]).indexOf(group) < 0) return;
+    const k = (chState.keyList || []).find(x => x.id === id);
+    out.push((k && (k.name || k.prefix)) || id.slice(0, 8));
+  });
+  return out;
+}
+
+// chBindBadge 渠道名下面的小字：已绑定几个密钥（0 个 = 未绑定，任何 key 都用不到它）。
+function chBindBadge(group) {
+  const keys = chBoundKeys(group);
+  return keys.length
+    ? '<div class="id" title="' + esc(keys.join('、')) + '">已绑定 ' + keys.length + ' 个密钥</div>'
+    : '<div class="id">未绑定密钥（任何 key 都用不到）</div>';
+}
+
 // channelMemberNames 返回分组的成员账号显示名（昵称优先，回退短 uid）。
 function channelMemberNames(group) {
   return (chState.members[group] || []);
@@ -2958,7 +2982,8 @@ function renderChannels() {
     const rt = chState.route[n] || {};
     const wl = chModelListText(d.models);
     return '<tr title="成员：' + esc(members.join('、') || '（无）') + '">' +
-      '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div></td>' +
+      '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div>' +
+        chBindBadge(n) + '</td>' +
       '<td>' + ((d.realm || '') === '' ? '<span class="note">（不限）</span>' : esc(d.realm)) + '</td>' +
       '<td>' + (wl ? esc(wl) : '<span class="note">（不限）</span>') + '</td>' +
       '<td>' + mTag + '</td>' +
@@ -2978,7 +3003,8 @@ function renderChannels() {
     const url = String(d.upstream_url || '');
     const host = url.replace(/^https?:\/\//i, '');
     return '<tr title="上游：' + esc(url) + '">' +
-      '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div></td>' +
+      '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div>' +
+        chBindBadge(n) + '</td>' +
       '<td><span class="id" title="' + esc(url) + '">' + esc(host) + '</span></td>' +
       '<td>' + (wl ? esc(chModelListText(d.models)) : '<span class="note">（自动：上游全部模型）</span>') + '</td>' +
       '<td><span class="tag ' + (enabled ? 'ok">启用' : 'bad">停用') + '</span></td>' +
@@ -2996,7 +3022,8 @@ function renderChannels() {
     const url = String(d.upstream_url || 'https://gateway.qwenwork.cn');
     const host = url.replace(/^https?:\/\//i, '');
     return '<tr title="千问办公 · ' + esc(url) + '">' +
-      '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div></td>' +
+      '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div>' +
+        chBindBadge(n) + '</td>' +
       '<td><span class="id">' + esc(host) + '</span></td>' +
       '<td>' + (accs ? '<span class="tag ok">' + accs + ' 个</span>'
                      : '<span class="tag warn">未授权</span>') + '</td>' +
@@ -3010,42 +3037,38 @@ function renderChannels() {
   // ④ 密钥绑定表（只读生效列 + 绑定按钮走弹窗）
   const keys = chState.keyList;
   $('chKeyBody').innerHTML = keys.length ? keys.map(k => {
-    const bound = chState.keys[k.id] || '';
+    const groups = splitBindings(chState.keys[k.id]);
+    const chips = groups.map(g => {
+      const d = chState.defs[g];
+      if (!d) return '<span class="tag bad">' + esc(g) + ' 未定义</span>';
+      if (d.enabled === false) return '<span class="tag bad">' + esc(g) + ' 已停用 → 403</span>';
+      let extra;
+      if (String(d.type || '') === 'qwenwork') {
+        const accs = (d.accounts || []).length;
+        extra = accs ? accs + ' 个授权账号' : '未授权 → 请求失败';
+      } else if (d.upstream_url) {
+        const wl = (d.models || []).length;
+        extra = wl ? wl + ' 项白名单' : '自动全量';
+      } else {
+        const cnt = channelMemberNames(g).length;
+        extra = cnt ? cnt + ' 个账号' : '无成员 → 请求失败';
+      }
+      return '<span class="tag ok">' + esc(g) + ' · ' + esc(extra) + '</span>';
+    }).join(' ');
     let eff;
-    if (!bound) {
+    if (!groups.length) {
       eff = chState.enabled
-        ? '<span class="note">仅账号池模型（未绑定）</span>'
+        ? '<span class="tag ok">池子（默认）</span> <span class="note">未绑定渠道</span>'
         : '<span class="note">渠道隔离已关闭</span>';
-    } else if (!chState.defs[bound]) {
-      eff = '<span class="tag bad">渠道未定义</span>';
-    } else if (chState.defs[bound].enabled === false) {
-      eff = '<span class="tag bad">渠道已停用 → 请求 403</span>';
-    } else if (String(chState.defs[bound].type || '') === 'qwenwork') {
-      const accs = (chState.defs[bound].accounts || []).length;
-      eff = accs
-        ? '<span class="tag ok">千问办公 · ' + accs + ' 个授权账号</span>'
-        : '<span class="tag warn">千问办公 · 未授权账号 → 请求失败</span>';
-    } else if (chState.defs[bound].upstream_url) {
-      const url = esc(chState.defs[bound].upstream_url);
-      const host = esc(String(chState.defs[bound].upstream_url).replace(/^https?:\/\//i, ''));
-      const wl = (chState.defs[bound].models || []).length;
-      eff = wl
-        ? '<span class="tag ok" title="请求转发到 ' + url +
-          '；未命中白名单的模型回落账号池">外部上游 ' + host + ' · ' + wl + ' 项模型走上游</span>'
-        : '<span class="tag ok" title="白名单为空 = 自动取上游提供的全部模型：上游有的模型走上游，' +
-          '只有账号池有的模型回落账号池；可用「测试渠道」查看逐模型状态">外部上游 ' +
-          host + ' · <strong>自动</strong>（上游全部模型）</span>';
     } else {
-      const cnt = channelMemberNames(bound).length;
-      eff = cnt ? '<span class="tag ok">限 ' + esc(bound) + ' · ' + cnt + ' 个账号</span>'
-                : '<span class="tag warn">该分组无成员账号 → 请求失败</span>';
+      eff = '<span class="tag ok">池子（默认）</span> ' + chips;
     }
     const disabled = k.enabled === false;
     return '<tr title="密钥 ID: ' + esc(k.id) + '">' +
       '<td class="who"><div class="nm">' + esc(k.name || '（未命名）') +
         (disabled ? ' <span class="tag bad">已禁用</span>' : '') + '</div></td>' +
       '<td class="who"><div class="id">' + esc(k.prefix || '') + '…</div></td>' +
-      '<td>' + (bound ? esc(bound) : '<span class="note">（未绑定）</span>') + '</td>' +
+      '<td>' + (groups.length ? groups.map(g => '<span class="id">' + esc(g) + '</span>').join(' ') : '<span class="note">（未绑定）</span>') + '</td>' +
       '<td>' + eff + ' <button class="xs ghost" data-act="key-bind" data-id="' + esc(k.id) + '">绑定</button></td></tr>';
   }).join('') : '<tr><td colspan="4"><div class="empty">还没有调用密钥。先到「API 密钥」页创建。</div></td></tr>';
 }
@@ -3586,25 +3609,23 @@ function keyBindModal(id) {
   keyBindState.modalOpen = true; keyBindState.saving = false;
   keyBindState.opener = document.activeElement;
   $('keyBindTitle').textContent = '绑定密钥「' + (k.name || k.prefix || id.slice(0, 8)) + '」';
-  const cur = chState.keys[id] || '';
-  $('keyBindSel').innerHTML = '<option value="">（不绑定，仅账号池模型）</option>' + chGroupNames().map(n => {
+  const cur = splitBindings(chState.keys[id]);
+  const names = chGroupNames();
+  $('keyBindList').innerHTML = names.length ? names.map(n => {
     const def = chState.defs[n] || {};
-    const kind = def.upstream_url ? '外部上游' : '账号池';
-    return '<option value="' + esc(n) + '"' + (cur === n ? ' selected' : '') + '>' +
-      esc(n) + '（' + kind + '）</option>';
-  }).join('');
-  const curDef = cur ? (chState.defs[cur] || {}) : {};
-  $('keyBindHint').textContent = cur
-    ? (curDef.upstream_url
-      ? '当前绑定到外部上游「' + cur + '」：请求直接转发到 ' + curDef.upstream_url +
-        '（不需要账号池成员），未命中白名单的模型回落账号池。'
-      : '当前绑定到账号池渠道「' + cur + '」：只走同组账号；改选即切换，选"不限制"即解绑。')
-    : '未绑定：该密钥只能用账号池模型，看不到渠道模型。选一个渠道即按该渠道路由'
-      + '（外部上游看白名单分流，账号池分组只走同组账号）。';
+    const kind = String(def.type || '') === 'qwenwork' ? '千问办公'
+      : (def.upstream_url ? '外部上游' : '账号池');
+    const on = cur.indexOf(n) >= 0;
+    return '<label class="kbchip' + (on ? ' on' : '') + '"><input type="checkbox" value="' +
+      esc(n) + '"' + (on ? ' checked' : '') + '><span>' + esc(n) + '</span>' +
+      '<span class="note">' + kind + '</span></label>';
+  }).join('') : '<span class="note">还没有渠道定义，先去上面的分页新建一个。</span>';
+  $('keyBindHint').textContent = cur.length
+    ? '当前绑定：' + cur.join('、') + '（池子模型始终可用，渠道模型按勾选顺序先到先用）'
+    : '未绑定：该密钥只能用账号池模型。勾选渠道后 = 池子 + 这些渠道的模型全部可用。';
   keyBindErr('');
   $('keyBindSave').disabled = false; $('keyBindSave').textContent = '保存';
   $('keyBindVeil').classList.add('on');
-  $('keyBindSel').focus();
 }
 function closeKeyBindModal(restoreFocus, force) {
   if (restoreFocus === undefined) restoreFocus = true;
@@ -3619,15 +3640,18 @@ async function keyBindSubmit() {
   if (keyBindState.saving || !keyBindState.modalOpen) return;
   keyBindErr('');
   const id = keyBindState.id;
-  const g = String($('keyBindSel').value || '');
-  if (g && !chState.defs[g]) { keyBindErr('分组「' + g + '」不存在，请先创建渠道'); return; }
+  const picked = Array.from($('keyBindList').querySelectorAll('input[type=checkbox]'))
+    .filter(x => x.checked).map(x => x.value);
+  const bad = picked.filter(g => !chState.defs[g]);
+  if (bad.length) { keyBindErr('分组「' + bad.join('、') + '」不存在，请先创建渠道'); return; }
+  const g = picked.join(',');
   keyBindState.saving = true; $('keyBindSave').disabled = true; $('keyBindSave').textContent = '保存中…';
   try {
     await pushConfigPatch(state => {
       if (g) state.chKeys[id] = g;
       else delete state.chKeys[id];
     });
-    toast(g ? '已绑定到「' + g + '」' : '已解绑，全池可用', 'ok');
+    toast(g ? '已绑定到「' + picked.join('、') + '」（池子模型仍然可用）' : '已解绑，只剩池子模型', 'ok');
     closeKeyBindModal(false, true);
     await loadChannels();
   } catch (e) { keyBindErr(e.message); toast('保存失败：' + e.message, 'err'); }
