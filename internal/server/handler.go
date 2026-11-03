@@ -399,6 +399,13 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				seen[id] = true
+				// 渠道模型的显示名带上渠道标识，客户端模型选择器里才能一眼区分
+				// 「池子的模型」和「某个渠道的模型」。id 保持裸名不变，不影响调用。
+				if lbl := strings.TrimSpace(ch.Label); lbl != "" {
+					if nm, _ := entry["name"].(string); nm == "" || nm == id {
+						entry["name"] = "[" + lbl + "] " + id
+					}
+				}
 				list = append(list, entry)
 			}
 		}
