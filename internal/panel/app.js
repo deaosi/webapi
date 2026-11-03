@@ -326,7 +326,10 @@ function renderZen() {
       '<td class="c-acts">' + (b ? '<button class="xs ghost" data-act="zen-unblock" data-m="' + esc(id) + '">解除</button>' : '') + '</td></tr>';
   }).join('') : '<tr><td colspan="8"><div class="empty">暂无模型（目录尚未就绪，可点「刷新目录」）</div></td></tr>';
 }
-$('btnZenReload').onclick = () => loadZen(true);
+// 绑定前先取元素：改版时漏掉一个按钮，不该让整页脚本停在求值阶段（之前就因此
+// 让「上游渠道」所有点击失效，且只在控制台留一行 TypeError）。
+const zenReloadBtn = $('btnZenReload');
+if (zenReloadBtn) zenReloadBtn.onclick = () => loadZen(true);
 $('btnZenCatalog').onclick = async () => {
   const b = $('btnZenCatalog');
   b.disabled = true; const old = b.textContent; b.textContent = '刷新中…';
