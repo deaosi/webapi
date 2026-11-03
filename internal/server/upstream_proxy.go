@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -95,6 +96,20 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, ch ChannelInfo, raw
 			w.Header().Set(h, v)
 		}
 	}
+	// 上游拒绝网关的密钥（401/403）：**不能原样透传**。
+	// 客户端看到 401 会判定"我自己的 API key 无效"（DSH 就渲染成「API 密钥无效」），
+	// 而实际上坏掉的是渠道配置里的上游密钥，跟调用者无关。转成 502 + 明确文案。
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		detail := truncateForLog(strings.TrimSpace(string(raw)), 200)
+		log.Printf("WARN: [server] upstream channel %q rejected gateway key: HTTP %d %s",
+			ch.logName(), resp.StatusCode, detail)
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_auth_failed",
+			"上游渠道「"+ch.logName()+"」拒绝了网关配置的 API Key（HTTP "+strconv.Itoa(resp.StatusCode)+"）："+
+				detail+"；请到面板「上游渠道」更新该渠道的上游密钥")
+		return
+	}
+
 	// 上游非 2xx：透传其状态码与响应体（上游的错误信息比网关编造的更有用），
 	// 但对 404 追加一句排障提示——实测最常见的成因是 base_url 漏了 /v1 前缀
 	// （拼出来成了 "<host>/chat/completions"，上游自然 404）。
