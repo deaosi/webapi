@@ -67,6 +67,18 @@ type Config struct {
 	// 原话里看出来，网关不缓存也不翻译。nil 时端点返回 501。
 	TestUpstream func(channel string) map[string]any
 
+	// QwenworkDeviceStart 生成一次千问办公设备授权会话（渠道页"添加账号"用）。
+	// 返回 {url, nonce, verifier, machine_id}：url 显示给运维在浏览器里确认授权，
+	// nonce/verifier 留在前端做轮询。nil 时端点返回 501。
+	QwenworkDeviceStart func() (map[string]any, error)
+	// QwenworkDevicePoll 轮询设备授权结果。pending=true 表示还没确认；
+	// 成功时返回 {account: {...}}（access/refresh token，前端存进渠道配置）。
+	QwenworkDevicePoll func(channel, nonce, verifier string) (map[string]any, error)
+	// QwenworkModels 拉取某千问办公渠道的模型目录（它自己的 /algo/api/v2/model/list）。
+	QwenworkModels func(channel string) ([]string, error)
+	// QwenworkRemoveAccount 删除某千问办公渠道第 index 个已授权账号（写盘 + 热生效）。
+	QwenworkRemoveAccount func(channel string, index int) (int, error)
+
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
@@ -199,6 +211,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("POST /panel/api/channels/upstream_models", p.withAuth(p.channelUpstreamModels))
 	p.mux.HandleFunc("POST /panel/api/channels/test_upstream", p.withAuth(p.channelTestUpstream))
+	p.mux.HandleFunc("POST /panel/api/channels/qwenwork/device_start", p.withAuth(p.qwenworkDeviceStart))
+	p.mux.HandleFunc("POST /panel/api/channels/qwenwork/device_poll", p.withAuth(p.qwenworkDevicePoll))
+	p.mux.HandleFunc("POST /panel/api/channels/qwenwork/models", p.withAuth(p.qwenworkModels))
+	p.mux.HandleFunc("POST /panel/api/channels/qwenwork/account_remove", p.withAuth(p.qwenworkRemoveAccount))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	p.mux.HandleFunc("GET /panel/api/api_keys", p.withAuth(p.listAPIKeys))

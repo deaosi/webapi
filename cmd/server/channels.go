@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/apikeys"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/qwenwork"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 )
 
@@ -49,6 +50,9 @@ type ChannelDef struct {
 	// UpstreamType 上游协议："" 或 "openai" = OpenAI 兼容（当前唯一实现）。
 	// 预留枚举位，避免将来加 Claude/Gemini 原生协议时改结构。
 	UpstreamType string `json:"upstream_type"`
+	// Accounts 千问办公账号（仅 type=qwenwork）：设备授权得到的 access/refresh token。
+	// 这是唯一没有静态 API key 的渠道类型，鉴权全靠这套 token。
+	Accounts []qwenwork.Account `json:"accounts,omitempty"`
 }
 
 // IsExternal 该渠道是否为外部上游（填了 upstream_url）。
@@ -144,8 +148,37 @@ func normalizeChannels(ch *Channels) error {
 			if def.UpstreamType != "openai" {
 				return fmt.Errorf("channels.groups[%q].upstream_type: %q 非法（openai）", name, def.UpstreamType)
 			}
+		case "qwenwork":
+			// 千问办公：地址固定（可覆盖成反代），没有静态 key，靠账号 token 鉴权。
+			if def.UpstreamURL == "" {
+				def.UpstreamURL = qwenwork.BaseURL
+			}
+			if !strings.HasPrefix(def.UpstreamURL, "http://") && !strings.HasPrefix(def.UpstreamURL, "https://") {
+				return fmt.Errorf("channels.groups[%q].upstream_url: 必须以 http:// 或 https:// 开头", name)
+			}
+			if _, err := url.ParseRequestURI(def.UpstreamURL); err != nil {
+				return fmt.Errorf("channels.groups[%q].upstream_url: %w", name, err)
+			}
+			if def.UpstreamType == "" {
+				def.UpstreamType = "qwenwork"
+			}
+			// 账号可以暂时为空（先建渠道、再去面板点授权），运行期会回
+			// "该渠道还没有授权任何千问办公账号"，比禁止保存更好定位。
+			cleanedAccs := make([]qwenwork.Account, 0, len(def.Accounts))
+			for _, acc := range def.Accounts {
+				acc.AccessToken = strings.TrimSpace(acc.AccessToken)
+				acc.RefreshToken = strings.TrimSpace(acc.RefreshToken)
+				acc.Nickname = strings.TrimSpace(acc.Nickname)
+				acc.Email = strings.TrimSpace(acc.Email)
+				acc.UID = strings.TrimSpace(acc.UID)
+				if acc.AccessToken == "" {
+					continue
+				}
+				cleanedAccs = append(cleanedAccs, acc)
+			}
+			def.Accounts = cleanedAccs
 		default:
-			return fmt.Errorf("channels.groups[%q].type: %q 非法（pool / openai）", name, def.Type)
+			return fmt.Errorf("channels.groups[%q].type: %q 非法（pool / openai / qwenwork）", name, def.Type)
 		}
 		ch.Groups[name] = def
 	}
@@ -247,6 +280,7 @@ func (r *channelRouter) OwnerOfModel(bare string) (string, bool) {
 			Enabled:     true,
 			UpstreamURL: def.UpstreamURL,
 			UpstreamKey: def.UpstreamKey,
+			Accounts:    def.Accounts,
 		}
 		if !server.ChannelServesModel(info, bare, nil) {
 			continue
@@ -292,6 +326,7 @@ func (r *channelRouter) Set(ch *Channels) {
 				Enabled:     def.EnabledOn(),
 				UpstreamURL: def.UpstreamURL,
 				UpstreamKey: def.UpstreamKey,
+				Accounts:    def.Accounts,
 			}
 			if strings.HasPrefix(ref, apikeys.SecretPrefix) {
 				hasPrefix = true
@@ -332,6 +367,17 @@ func (r *channelRouter) Set(ch *Channels) {
 				_, _ = server.FetchUpstreamModelIDs(in.UpstreamURL, in.UpstreamKey, in.Label,
 					server.UpstreamModelTimeoutInteractive)
 			}(info)
+		}
+	}
+	// 千问办公的模型目录来自它自己的端点（不是 /v1/models），单独预热。
+	for _, info := range byID {
+		if info.Type == "qwenwork" {
+			server.PrimeQwenworkModels(info)
+		}
+	}
+	for _, info := range byPrefix {
+		if info.Type == "qwenwork" {
+			server.PrimeQwenworkModels(info)
 		}
 	}
 }
@@ -421,6 +467,18 @@ type channelStatus struct {
 
 // channelStatusDef 渠道定义的状态透出形态：与 ChannelDef 同构，但**上游密钥脱敏**
 // （只留长度与尾 4 位）。/status 是运维观测面，不该成为上游密钥的泄露口。
+// channelAccountView 千问办公账号的状态透出形态：令牌只留尾 6 位。
+// 面板要能列出"这个渠道授权了哪几个号"并支持删除，但绝不下发可用令牌。
+type channelAccountView struct {
+	Index      int    `json:"index"`
+	UID        string `json:"uid,omitempty"`
+	Nickname   string `json:"nickname,omitempty"`
+	Email      string `json:"email,omitempty"`
+	ExpiresAt  int64  `json:"expires_at,omitempty"`
+	TokenTail  string `json:"token_tail,omitempty"`
+	HasRefresh bool   `json:"has_refresh"`
+}
+
 type channelStatusDef struct {
 	Type        string   `json:"type"`
 	Label       string   `json:"label"`
@@ -429,6 +487,8 @@ type channelStatusDef struct {
 	Enabled     bool     `json:"enabled"`
 	UpstreamURL string   `json:"upstream_url,omitempty"`
 	UpstreamKey string   `json:"upstream_key,omitempty"` // 已脱敏
+	// Accounts 千问办公渠道的已授权账号（令牌脱敏）。其它类型恒为空。
+	Accounts []channelAccountView `json:"accounts,omitempty"`
 }
 
 func (d ChannelDef) statusView() channelStatusDef {
@@ -436,6 +496,17 @@ func (d ChannelDef) statusView() channelStatusDef {
 	if d.UpstreamKey != "" {
 		// 只留"长度 + 尾 4 位"：足以核对填的是不是预期的那把钥匙，又不足以复用。
 		key = "***" + d.UpstreamKey[max(0, len(d.UpstreamKey)-4):] + "(len=" + itoa(len(d.UpstreamKey)) + ")"
+	}
+	accs := make([]channelAccountView, 0, len(d.Accounts))
+	for i, a := range d.Accounts {
+		tail := ""
+		if n := len(a.AccessToken); n > 6 {
+			tail = "***" + a.AccessToken[n-6:]
+		}
+		accs = append(accs, channelAccountView{
+			Index: i, UID: a.UID, Nickname: a.Nickname, Email: a.Email,
+			ExpiresAt: a.ExpiresAt, TokenTail: tail, HasRefresh: a.RefreshToken != "",
+		})
 	}
 	return channelStatusDef{
 		Type:        d.Type,
@@ -445,6 +516,7 @@ func (d ChannelDef) statusView() channelStatusDef {
 		Enabled:     d.EnabledOn(),
 		UpstreamURL: d.UpstreamURL,
 		UpstreamKey: key,
+		Accounts:    accs,
 	}
 }
 

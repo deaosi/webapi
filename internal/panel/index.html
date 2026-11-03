@@ -968,6 +968,7 @@ select.grp-sel { max-width: 130px; }
           <div class="chtabs" id="chTabs" role="tablist">
             <button type="button" class="chtab on" data-act="chtab" data-tab="pool">账号池渠道</button>
             <button type="button" class="chtab" data-act="chtab" data-tab="openai">OpenAI 兼容</button>
+            <button type="button" class="chtab" data-act="chtab" data-tab="qwenwork">千问办公</button>
             <button type="button" class="chtab" data-act="chtab" data-tab="zen">Zen 通道</button>
             <button type="button" class="chtab" data-act="chtab" data-tab="keys">密钥绑定</button>
           </div>
@@ -995,6 +996,20 @@ select.grp-sel { max-width: 130px; }
             <div class="tbl-wrap"><table class="acc">
               <thead><tr><th>渠道</th><th>请求地址</th><th>模型</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
               <tbody id="chExtBody"></tbody>
+            </table></div>
+          </div>
+
+          <!-- ③ 千问办公（QwenWork）：设备授权加号，没有静态 API Key -->
+          <div class="chpane" id="chpane-qwenwork" hidden>
+            <div class="chbar">
+              <p class="ak-note">千问办公（QwenWork）没有静态 API Key：加号走<strong>设备授权</strong>——面板生成授权链接，
+                用千问办公账号在浏览器里确认，令牌自动落库。绑定的密钥命中该渠道模型即转发到千问办公，
+                未命中的回落账号池。</p>
+              <button class="xs primary" data-act="ch-add" data-kind="qwenwork">新增千问办公渠道</button>
+            </div>
+            <div class="tbl-wrap"><table class="acc">
+              <thead><tr><th>渠道</th><th>请求地址</th><th>授权账号</th><th>模型</th><th>状态</th><th class="c-acts">操作</th></tr></thead>
+              <tbody id="chQwenBody"></tbody>
             </table></div>
           </div>
 
@@ -1065,6 +1080,7 @@ select.grp-sel { max-width: 130px; }
             <select id="chEditKind">
               <option value="pool">账号池分组（走 WorkBuddy 账号，按分组选号）</option>
               <option value="external">外部上游端点（填请求地址 + 密钥，直接转发）</option>
+              <option value="qwenwork">千问办公（设备授权登录，无静态密钥）</option>
             </select>
             <span class="hint">选「外部上游」时填写下面的接入信息；选「账号池」则忽略它们</span></label>
 
@@ -1085,6 +1101,23 @@ select.grp-sel { max-width: 130px; }
               <button type="button" class="xs" id="chEditTestBtn" data-act="chtest-upstream">测试渠道</button>
               <span class="hint" id="chEditTestNote">对渠道里的模型逐个真实探一次（各发 1 token），把上游原话显示出来</span>
               <div class="ch-test-out" id="chEditTestOut" hidden></div>
+            </div>
+          </div>
+
+          <div id="chEditQwen" hidden>
+            <div class="hr"></div>
+            <h4 class="sub-h">千问办公授权 <span class="hint">设备授权：生成链接 → 浏览器确认 → 面板自动收号</span></h4>
+            <div class="fld">
+              <button type="button" class="xs" id="chQwenAuthBtn" data-act="qw-device">生成授权链接</button>
+              <span class="hint" id="chQwenAuthNote">新建渠道请先保存，再回来生成授权链接</span>
+              <div class="ch-test-out" id="chQwenAuthOut" hidden></div>
+            </div>
+            <div class="fld"><span class="lb">已授权账号</span>
+              <div id="chQwenAccounts" class="ch-models"></div></div>
+            <div class="fld">
+              <button type="button" class="xs" id="chQwenModelsBtn" data-act="qw-fetch-models">拉取千问办公模型</button>
+              <span class="hint" id="chQwenModelsNote">从千问办公的模型目录拉当前可用模型（点一个加入白名单）</span>
+              <div id="chQwenModelsList" class="ch-models"></div>
             </div>
           </div>
 

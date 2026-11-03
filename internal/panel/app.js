@@ -2922,7 +2922,7 @@ function chModelListText(models) { return (models || []).join(', '); }
 // setChTab 切换「上游渠道」页内的四个分页。每种渠道类型一个分页：账号池渠道、
 // OpenAI 兼容上游、Zen 旁路通道、密钥绑定。Zen 分页才按需拉取侧车状态。
 function setChTab(tab) {
-  const tabs = ['pool', 'openai', 'zen', 'keys'];
+  const tabs = ['pool', 'openai', 'qwenwork', 'zen', 'keys'];
   if (tabs.indexOf(tab) < 0) tab = 'pool';
   chState.tab = tab;
   document.querySelectorAll('#chTabs .chtab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
@@ -2937,9 +2937,12 @@ function renderChannels() {
     ? ('共 ' + names.length + ' 个渠道定义 · ' + Object.keys(chState.keys).length + ' 条密钥绑定')
     : '正在加载…';
 
-  const isExtOf = d => !!(d && d.upstream_url);
-  const poolNames = names.filter(n => !isExtOf(chState.defs[n]));
-  const extNames = names.filter(n => isExtOf(chState.defs[n]));
+  // 渠道类型决定落在哪个分页：qwenwork（千问办公）/ openai（外部端点）/ pool（账号池）。
+  // 老配置没有 type 字段，按"填了 upstream_url 就是外部端点"回退，避免历史渠道凭空消失。
+  const kindOf = d => String((d && d.type) || (d && d.upstream_url ? 'openai' : 'pool'));
+  const qwenNames = names.filter(n => kindOf(chState.defs[n]) === 'qwenwork');
+  const poolNames = names.filter(n => kindOf(chState.defs[n]) === 'pool');
+  const extNames = names.filter(n => kindOf(chState.defs[n]) === 'openai');
 
   // ① 账号池渠道：分组 + 成员 + 池内路由权重
   $('chPoolBody').innerHTML = poolNames.length ? poolNames.map(n => {
@@ -2981,6 +2984,26 @@ function renderChannels() {
   }).join('') : '<tr><td colspan="5"><div class="empty">还没有 OpenAI 兼容上游。点「新增 OpenAI 上游」' +
       '填请求地址和上游 API Key。</div></td></tr>';
 
+  // ③ 千问办公：没有静态密钥，靠设备授权收号
+  $('chQwenBody').innerHTML = qwenNames.length ? qwenNames.map(n => {
+    const d = chState.defs[n] || {};
+    const enabled = d.enabled !== false;
+    const accs = (d.accounts || []).length;
+    const wl = (d.models || []).length;
+    const url = String(d.upstream_url || 'https://gateway.qwenwork.cn');
+    const host = url.replace(/^https?:\/\//i, '');
+    return '<tr title="千问办公 · ' + esc(url) + '">' +
+      '<td class="who"><div class="nm">' + esc(d.label || n) + '</div><div class="id">' + esc(n) + '</div></td>' +
+      '<td><span class="id">' + esc(host) + '</span></td>' +
+      '<td>' + (accs ? '<span class="tag ok">' + accs + ' 个</span>'
+                     : '<span class="tag warn">未授权</span>') + '</td>' +
+      '<td>' + (wl ? esc(chModelListText(d.models)) : '<span class="note">（自动：千问办公全部模型）</span>') + '</td>' +
+      '<td><span class="tag ' + (enabled ? 'ok">启用' : 'bad">停用') + '</span></td>' +
+      '<td><button class="xs ghost" data-act="ch-edit" data-g="' + esc(n) + '">编辑</button> ' +
+      '<button class="xs ghost danger" data-act="ch-del" data-g="' + esc(n) + '">删除</button></td></tr>';
+  }).join('') : '<tr><td colspan="6"><div class="empty">还没有千问办公渠道。点「新增千问办公渠道」建一个，' +
+      '再进编辑里生成授权链接收号。</div></td></tr>';
+
   // ④ 密钥绑定表（只读生效列 + 绑定按钮走弹窗）
   const keys = chState.keyList;
   $('chKeyBody').innerHTML = keys.length ? keys.map(k => {
@@ -2994,6 +3017,11 @@ function renderChannels() {
       eff = '<span class="tag bad">渠道未定义</span>';
     } else if (chState.defs[bound].enabled === false) {
       eff = '<span class="tag bad">渠道已停用 → 请求 403</span>';
+    } else if (String(chState.defs[bound].type || '') === 'qwenwork') {
+      const accs = (chState.defs[bound].accounts || []).length;
+      eff = accs
+        ? '<span class="tag ok">千问办公 · ' + accs + ' 个授权账号</span>'
+        : '<span class="tag warn">千问办公 · 未授权账号 → 请求失败</span>';
     } else if (chState.defs[bound].upstream_url) {
       const url = esc(chState.defs[bound].upstream_url);
       const host = esc(String(chState.defs[bound].upstream_url).replace(/^https?:\/\//i, ''));
@@ -3087,8 +3115,9 @@ function chEditModal(mode, name, kind) {
   chEditState.modalOpen = true; chEditState.saving = false;
   chEditState.opener = document.activeElement;
   const wantExt = mode === 'create' && kind === 'openai';
+  const wantQwen = mode === 'create' ? kind === 'qwenwork' : !!(row && String(row.type || '') === 'qwenwork');
   $('chEditTitle').textContent = mode === 'create'
-    ? (wantExt ? '新增 OpenAI 兼容上游' : '新增账号池渠道')
+    ? (wantQwen ? '新增千问办公渠道' : (wantExt ? '新增 OpenAI 兼容上游' : '新增账号池渠道'))
     : '编辑渠道「' + name + '」';
   const nm = $('chEditName');
   nm.disabled = mode === 'edit';
@@ -3098,8 +3127,11 @@ function chEditModal(mode, name, kind) {
   $('chEditModels').value = chModelListText((row && row.models) || []);
   $('chEditEnabled').checked = !row || row.enabled !== false;
   // 上游接入：外部渠道填了 upstream_url，账号池渠道为空。kind 决定显示哪一组字段。
-  const isExt = mode === 'edit' ? !!(row && row.upstream_url) : wantExt;
-  $('chEditKind').value = isExt ? 'external' : 'pool';
+  const isExt = wantQwen ? false : (mode === 'edit' ? !!(row && row.upstream_url) : wantExt);
+  $('chEditKind').value = wantQwen ? 'qwenwork' : (isExt ? 'external' : 'pool');
+  // 千问办公的账号表来自配置本身（面板是管理面；令牌不出这个页面、也不回传服务端）。
+  chEditState.qwAccounts = wantQwen && row ? (row.accounts || []) : [];
+  chEditState.qwPolling = false;
   $('chEditUpstreamURL').value = (row && row.upstream_url) || '';
   // 编辑时密钥框不回填明文（只留占位提示"已保存，留空即不修改"），避免页面长期驻留上游密钥。
   $('chEditUpstreamKey').value = '';
@@ -3115,7 +3147,8 @@ function chEditModal(mode, name, kind) {
   $('chEditWeight').value = Number.isFinite(rw) && rw > 0 ? rw : 1;
   chEditRenderMembers(name, mode);
   $('chEditHint').textContent = mode === 'create'
-    ? '建好后，到账号池把账号划进该分组，成员数随后显示。'
+    ? (wantQwen ? '建好后回到这里「生成授权链接」，用千问办公账号确认即可收号。'
+                : '建好后，到账号池把账号划进该分组，成员数随后显示。')
     : '改名走删除+新建；该渠道绑定的密钥保持原分组名（需另行调整）。';
   chEditErr('');
   $('chEditSave').disabled = false; $('chEditSave').textContent = mode === 'create' ? '创建' : '保存';
@@ -3125,13 +3158,18 @@ function chEditModal(mode, name, kind) {
 // chEditToggleKind 按渠道类型切换字段显示：外部上游显示接入区块、隐藏成员提示；
 // 账号池渠道反之（外部渠道没有"成员账号"概念，请求不进池子）。
 function chEditToggleKind() {
-  const isExt = String(($('chEditKind') || {}).value || '') === 'external';
+  const kindVal = String(($('chEditKind') || {}).value || '');
+  const isExt = kindVal === 'external';
+  const isQwen = kindVal === 'qwenwork';
+  const qwBox = $('chEditQwen');
+  if (qwBox) qwBox.hidden = !isQwen;
+  if (isQwen) qwRenderAccounts();
   $('chEditUpstream').hidden = !isExt;
   const memEl = $('chEditMembers');
   if (memEl) memEl.hidden = isExt;
   // realm 只对账号池渠道有意义（选号域过滤）；外部上游的"域"由上游地址决定。
   const realmEl = $('chEditRealm');
-  if (realmEl) { realmEl.closest('label').hidden = isExt; }
+  if (realmEl) { realmEl.closest('label').hidden = isExt || isQwen; }
   // 拉取上游模型只对外部渠道有意义；切到账号池就收起来并清掉候选（避免误当成池子模型）。
   const fetchRow = $('chEditFetchRow');
   if (fetchRow) fetchRow.hidden = !isExt;
@@ -3140,7 +3178,7 @@ function chEditToggleKind() {
   // 一个调用密钥只绑一个渠道，外部上游渠道不存在"多组竞争"，这两项对它是死字段：
   // 显示出来只会让人以为要填、填了又不生效。隐藏掉，也不参与校验与写盘。
   const routeRow = $('chEditRouteRow');
-  if (routeRow) routeRow.hidden = isExt;
+  if (routeRow) routeRow.hidden = isExt || isQwen;
 }
 
 // ── 拉取上游模型（帮助填写白名单：外部上游有哪些模型只有上游自己知道）──
@@ -3162,6 +3200,124 @@ function chEditClearTest() {
   if (note) note.textContent = '对渠道里的模型逐个真实探一次（各发 1 token），把上游原话显示出来';
 }
 
+// ── 千问办公授权（设备码）──
+// 千问办公没有可复制的 API Key：面板生成授权页链接 → 运维在浏览器用账号确认 →
+// 面板轮询 /deviceToken/poll 换令牌并**由服务端**写进渠道配置（前端不回传令牌）。
+function qwNote(msg) {
+  const el = $('chQwenAuthNote');
+  if (el) el.textContent = msg;
+}
+function qwRenderAccounts() {
+  const box = $('chQwenAccounts');
+  if (!box) return;
+  const list = chEditState.qwAccounts || [];
+  if (!list.length) {
+    box.innerHTML = '<span class="note">还没有授权账号</span>';
+    return;
+  }
+  box.innerHTML = list.map((a, i) => {
+    const nm = a.nickname || a.email || String(a.uid || '').slice(0, 10) || ('账号' + (i + 1));
+    const exp = Number(a.expires_at) > 0
+      ? new Date(Number(a.expires_at) * 1000).toLocaleString('zh-CN', { hour12: false })
+      : '—';
+    return '<span class="on" title="' + esc('过期：' + exp + (a.email ? ' · ' + a.email : '')) + '">' +
+      esc(nm) + ' <b data-act="qw-acc-del" data-i="' + i + '" style="cursor:pointer">✕</b></span>';
+  }).join('');
+}
+// qwReloadAccounts 重新读一次配置里的账号表（授权成功后刷新列表，不动弹窗其它字段）。
+async function qwReloadAccounts(name) {
+  try {
+    const cfg = await api('config');
+    const def = (((cfg || {}).config || {}).channels || {}).groups || {};
+    chEditState.qwAccounts = (def[name] || {}).accounts || [];
+    qwRenderAccounts();
+  } catch (e) { /* 刷新失败不影响已保存的账号，下次打开弹窗自然更新 */ }
+}
+async function qwDeviceStart() {
+  const isCreate = !$('chEditName').disabled;
+  const name = String((isCreate ? $('chEditName').value : chEditState.name) || '').trim();
+  if (!name) { chEditErr('先填分组名'); $('chEditName').focus(); return; }
+  if (isCreate) { qwNote('请先保存该渠道，再回来生成授权链接'); return; }
+  const out = $('chQwenAuthOut');
+  out.hidden = false;
+  out.textContent = '正在生成授权链接…';
+  try {
+    const d = await api('channels/qwenwork/device_start', { method: 'POST', body: '{}' });
+    const url = String((d && d.url) || '');
+    if (!url) throw new Error('上游没有返回授权地址');
+    out.innerHTML = '<a href="' + esc(url) + '" target="_blank" rel="noopener">打开授权页</a>' +
+      '<div class="note" style="margin-top:6px">用千问办公账号确认后，这里会自动收号（最长等 3 分钟）。</div>';
+    qwNote('等待浏览器确认…');
+    chEditState.qwPolling = true;
+    const deadline = Date.now() + 180000;
+    while (chEditState.qwPolling && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 2000));
+      if (!chEditState.modalOpen || !chEditState.qwPolling) return;
+      let res;
+      try {
+        res = await api('channels/qwenwork/device_poll', {
+          method: 'POST',
+          body: JSON.stringify({ channel: name, nonce: d.nonce, verifier: d.verifier }),
+        });
+      } catch (e) { qwNote('轮询失败：' + e.message); continue; }
+      if (res && res.pending) continue;
+      const acc = (res && res.account) || {};
+      chEditState.qwPolling = false;
+      qwNote('已授权：' + (acc.nickname || acc.email || acc.uid || '账号'));
+      out.innerHTML = '<span class="tag ok">授权成功，账号已保存</span>';
+      await qwReloadAccounts(name);
+      toast('千问办公账号已授权', 'ok');
+      return;
+    }
+    if (chEditState.qwPolling) { chEditState.qwPolling = false; qwNote('授权超时，重新生成链接再试'); }
+  } catch (e) {
+    chEditState.qwPolling = false;
+    out.textContent = '生成失败：' + e.message;
+    qwNote('生成失败：' + e.message);
+  }
+}
+async function qwRemoveAccount(index) {
+  const name = chEditState.name;
+  if (!name) return;
+  if (!confirm('删除该授权账号？删完后该渠道不再用它请求上游。')) return;
+  try {
+    await api('channels/qwenwork/account_remove', {
+      method: 'POST',
+      body: JSON.stringify({ channel: name, index: index }),
+    });
+    toast('账号已删除', 'ok');
+    await qwReloadAccounts(name);
+    await loadChannels();
+  } catch (e) { chEditErr('删除失败：' + e.message); }
+}
+async function qwFetchModels() {
+  const name = chEditState.name;
+  const note = $('chQwenModelsNote');
+  const box = $('chQwenModelsList');
+  if (!name) { if (note) note.textContent = '请先保存该渠道，再拉取模型'; return; }
+  if (note) note.textContent = '正在拉取…';
+  try {
+    const d = await api('channels/qwenwork/models', { method: 'POST', body: JSON.stringify({ channel: name }) });
+    const ids = (d && d.models) || [];
+    if (!ids.length) { if (note) note.textContent = '上游没有返回模型（账号未授权或已过期）'; return; }
+    if (note) note.textContent = '共 ' + ids.length + ' 个模型，点一个加入白名单';
+    const on = new Set(chEditModelTokens());
+    box.innerHTML = ids.map(id => '<span data-act="qwmodel-toggle" data-m="' + esc(id) + '"' +
+      (on.has(id) ? ' class="on"' : '') + '>' + esc(id) + '</span>').join('');
+  } catch (e) {
+    if (note) note.textContent = '拉取失败：' + e.message;
+  }
+}
+function qwToggleModel(id) {
+  const cur = chEditModelTokens();
+  const i = cur.indexOf(id);
+  if (i >= 0) cur.splice(i, 1); else cur.push(id);
+  $('chEditModels').value = cur.join(', ');
+  const on = new Set(cur);
+  document.querySelectorAll('#chQwenModelsList [data-act="qwmodel-toggle"]').forEach(el => {
+    el.classList.toggle('on', on.has(el.dataset.m));
+  });
+}
 function chEditModelTokens() {
   return String(($('chEditModels') || {}).value || '')
     .split(',').map(x => x.trim()).filter(Boolean);
@@ -3318,9 +3474,11 @@ async function chEditSubmit() {
   const label = String($('chEditLabel').value || '').trim();
   const enabled = !!$('chEditEnabled').checked;
   // 外部渠道跳过优先级/权重校验：这两项对它不生效，隐藏字段里的残值不该拦住保存。
-  const isExternalKind = String($('chEditKind').value || '') === 'external';
+  const kindVal = String($('chEditKind').value || '');
+  const isQwen = kindVal === 'qwenwork';
+  const isExternalKind = kindVal === 'external';
   let pri = 0, w = 1;
-  if (!isExternalKind) {
+  if (!isExternalKind && !isQwen) {
     pri = Math.trunc(Number(String($('chEditPriority').value).trim()));
     if (!Number.isFinite(pri)) { chEditErr('优先级必须是整数'); $('chEditPriority').focus(); return; }
     w = Number(String($('chEditWeight').value).trim());
@@ -3332,11 +3490,19 @@ async function chEditSubmit() {
     // 不会出现"渠道建好但账号池分组缺失"的中间态。
     // 按类型组装：外部渠道带上上游接入三件套；账号池渠道清空上游字段
     // （从外部改回账号池时必须清空，否则残留的 url 仍会把请求转发出去）。
-    const isExt = String($('chEditKind').value || '') === 'external';
+    const isExt = kindVal === 'external';
     // 外部渠道清空 realm：它的"域"由上游地址决定，留着上次账号池时代的残值只会
     // 让人以为它还生效（面板已隐藏该字段，后端也按类型跳过校验，这里把数据也弄干净）。
-    const def = { type: isExt ? 'openai' : 'pool', label, realm: isExt ? '' : realm, models, enabled };
-    if (isExt) {
+    const def = {
+      type: isQwen ? 'qwenwork' : (isExt ? 'openai' : 'pool'),
+      label, realm: isExt || isQwen ? '' : realm, models, enabled,
+    };
+    if (isQwen) {
+      // 千问办公没有静态密钥：地址留空即由后端补默认值，账号表由授权端点维护。
+      def.upstream_url = String($('chEditUpstreamURL').value || '').trim();
+      def.upstream_key = '';
+      def.upstream_type = 'qwenwork';
+    } else if (isExt) {
       const url = String($('chEditUpstreamURL').value || '').trim();
       const key = String($('chEditUpstreamKey').value || '');
       if (!/^https?:\/\//i.test(url)) { chEditErr('请求地址必须以 http:// 或 https:// 开头'); $('chEditUpstreamURL').focus(); return; }
@@ -3354,6 +3520,8 @@ async function chEditSubmit() {
     }
     await pushConfigPatch(state => {
       const prev = state.chGroups[name] || {};
+      // 千问办公的账号表由授权端点维护：编辑渠道（改白名单/展示名）绝不能把它抹掉。
+      if (isQwen) { def.accounts = prev.accounts || chEditState.qwAccounts || []; }
       // 编辑且密钥留空 → 保留原密钥（不覆盖成空）。
       if (!isExt) { def.upstream_key = ''; }
       else if (!def.upstream_key && prev.upstream_key) { def.upstream_key = prev.upstream_key; }
@@ -3361,7 +3529,7 @@ async function chEditSubmit() {
       // 只给**账号池渠道**建/改池分组：外部渠道不参与池内选号，给它建一个 0 成员的
       // 池分组只会在「账号池」页凭空多出一行、让人以为要往里塞账号。顺带把历史上
       // 误建的残留删掉（该分组对外部渠道没有任何作用）。
-      if (!isExt) state.groups[name] = { priority: pri, weight: w };
+      if (!isExt && !isQwen) state.groups[name] = { priority: pri, weight: w };
       else delete state.groups[name];
     });
     toast('渠道「' + name + '」已保存', 'ok');
@@ -3478,6 +3646,10 @@ document.addEventListener('click', ev => {
   if (act === 'ch-del') { chDelete(b.dataset.g); return; }
   if (act === 'key-bind') { keyBindModal(b.dataset.id); return; }
   if (act === 'chfetch-models') { chEditFetchModels(); return; }
+  if (act === 'qw-device') { qwDeviceStart(); return; }
+  if (act === 'qw-fetch-models') { qwFetchModels(); return; }
+  if (act === 'qw-acc-del') { qwRemoveAccount(Number(b.dataset.i)); return; }
+  if (act === 'qwmodel-toggle') { qwToggleModel(b.dataset.m); return; }
   if (act === 'chtest-upstream') { chEditTestUpstream(); return; }
   if (act === 'chfetch-toggle') { chEditToggleFetched(b.dataset.m); return; }
   if (act === 'chedit-save') { chEditSubmit(); return; }

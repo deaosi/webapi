@@ -674,7 +674,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 逼进一个空分组、直接 no_healthy_account。
 			if ch.IsExternal() {
 				if ChannelServesModel(ch, bareModel, h.poolModelNames()) {
-					proxyToUpstream(w, r, ch, body, bareModel)
+					// 千问办公是独立协议（cosy 签名 + 非 OpenAI 请求体 + 信封 SSE），
+					// 与"原样转发"的 OpenAI 兼容渠道不是一条路。
+					if ch.Type == "qwenwork" {
+						proxyQwenwork(w, r, ch, body, bareModel)
+					} else {
+						proxyToUpstream(w, r, ch, body, bareModel)
+					}
 					return
 				}
 			} else {

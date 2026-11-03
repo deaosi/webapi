@@ -9,7 +9,11 @@
 // 不跨组借号（含全冷却兜底与粘性命中两条路径，见 pool.pickLocked / pool.UIDInGroup）。
 package server
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/qwenwork"
+)
 
 // ChannelInfo 调用密钥绑定的上游渠道。零值 = 未绑定（不限制，现状行为）。
 //
@@ -38,6 +42,9 @@ type ChannelInfo struct {
 	UpstreamURL string
 	// UpstreamKey 外部上游鉴权密钥（转发时替换 Authorization）。
 	UpstreamKey string
+	// Accounts 千问办公账号（仅 Type == "qwenwork" 时有效）：设备授权得到的
+	// access/refresh token。没有静态密钥，鉴权全靠这套 token。
+	Accounts []qwenwork.Account
 }
 
 // IsExternal 该渠道是否为外部上游端点（填了 UpstreamURL）。
@@ -99,6 +106,15 @@ func ChannelModelSet(ch ChannelInfo, poolBare []string) []string {
 		//（"我就要这个模型走外部上游"是合法意图，不该被拦）。
 		return ch.Models
 	}
+	// 千问办公：模型目录来自它自己的 /algo/api/v2/model/list（不是 OpenAI 的 /v1/models），
+	// 走独立缓存。命中判定与外部渠道同口径：只接管池子里没有的模型。
+	if ch.Type == "qwenwork" {
+		ids := QwenworkModelIDsCached(ch)
+		if len(ids) == 0 {
+			return nil
+		}
+		return excludePoolModels(ids, poolBare)
+	}
 	if !ch.IsExternal() {
 		return nil
 	}
@@ -115,6 +131,11 @@ func ChannelModelSet(ch ChannelInfo, poolBare []string) []string {
 	// "把原来好用的模型改道"。若把与池子同名的（glm-5.3-flash 这类）也收过来，
 	// 上游一旦欠费/宕机，这些本来正常工作的模型会跟着一起挂——实测踩过这个坑。
 	// 要让同名模型改走外部上游，就在白名单里显式写出来。
+	return excludePoolModels(ids, poolBare)
+}
+
+// excludePoolModels 去掉账号池里已有的同名模型（自动模式只做"纯新增"）。
+func excludePoolModels(ids, poolBare []string) []string {
 	have := make(map[string]bool, len(poolBare))
 	for _, p := range poolBare {
 		if p = strings.TrimSpace(p); p != "" {
@@ -123,7 +144,7 @@ func ChannelModelSet(ch ChannelInfo, poolBare []string) []string {
 	}
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if !have[id] {
+		if id = strings.TrimSpace(id); id != "" && !have[id] {
 			out = append(out, id)
 		}
 	}

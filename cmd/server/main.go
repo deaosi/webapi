@@ -23,6 +23,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/qwenwork"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
@@ -314,6 +315,82 @@ func main() {
 				return nil, fmt.Errorf("渠道 %q 不是外部上游渠道（未填请求地址）", name)
 			}
 			return server.FetchUpstreamModelIDs(def.UpstreamURL, def.UpstreamKey, def.Label, 0)
+		},
+		// ── 千问办公（QwenWork）──
+		// 它没有静态 API key，加账号走设备授权：生成链接 → 运维在浏览器确认 → 轮询换令牌。
+		QwenworkDeviceStart: func() (map[string]any, error) {
+			flow, err := server.QwenworkDeviceStart()
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"url":        flow.URL,
+				"nonce":      flow.Nonce,
+				"verifier":   flow.Verifier,
+				"machine_id": flow.MachineID,
+			}, nil
+		},
+		QwenworkDevicePoll: func(channel, nonce, verifier string) (map[string]any, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			acc, pending, err := server.QwenworkPollGrant(ctx, qwenwork.DeviceFlow{Nonce: nonce, Verifier: verifier})
+			if err != nil {
+				return nil, err
+			}
+			if pending {
+				return map[string]any{"pending": true}, nil
+			}
+			// channel 非空 = 拿到令牌立刻落库（面板自己写盘，前端不回传令牌）。
+			name := strings.TrimSpace(channel)
+			if name == "" {
+				return map[string]any{"pending": false, "account": acc}, nil
+			}
+			if err := mutateQwenAccounts(*cfgPath, live, p, up, sch, chRouter, func(groups map[string]any) error {
+				def, err := qwenGroup(groups, name)
+				if err != nil {
+					return err
+				}
+				upsertQwenAccount(def, acc)
+				return nil
+			}); err != nil {
+				return nil, err
+			}
+			return map[string]any{"pending": false, "account": acc, "saved": true}, nil
+		},
+		QwenworkRemoveAccount: func(channel string, index int) (int, error) {
+			left := 0
+			err := mutateQwenAccounts(*cfgPath, live, p, up, sch, chRouter, func(groups map[string]any) error {
+				def, err := qwenGroup(groups, channel)
+				if err != nil {
+					return err
+				}
+				list, _ := def["accounts"].([]any)
+				if index < 0 || index >= len(list) {
+					return fmt.Errorf("账号序号越界（当前 %d 个）", len(list))
+				}
+				def["accounts"] = append(list[:index], list[index+1:]...)
+				left = len(list) - 1
+				return nil
+			})
+			return left, err
+		},
+		QwenworkModels: func(name string) ([]string, error) {
+			def, ok := chRouter.defByName(name)
+			if !ok {
+				return nil, fmt.Errorf("渠道 %q 不存在（可能刚被删除，刷新后重试）", name)
+			}
+			if def.Type != "qwenwork" {
+				return nil, fmt.Errorf("渠道 %q 不是千问办公渠道", name)
+			}
+			return server.QwenworkChannelModels(server.ChannelInfo{
+				Group:       name,
+				Type:        def.Type,
+				Label:       def.Label,
+				Models:      def.Models,
+				Enabled:     def.EnabledOn(),
+				UpstreamURL: def.UpstreamURL,
+				Accounts:    def.Accounts,
+			})
 		},
 		// 渠道页"测试渠道"：**逐个模型**真实探一次，返回每一项的原始状态码与响应体。
 		//

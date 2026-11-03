@@ -80,3 +80,116 @@ func (p *Panel) channelTestUpstream(w http.ResponseWriter, r *http.Request) {
 	res["channel"] = name
 	writeJSON(w, http.StatusOK, res)
 }
+
+// qwenworkDeviceStart 处理 POST /panel/api/channels/qwenwork/device_start。
+//
+// 千问办公没有静态 API key：加账号靠设备授权（生成授权页链接 → 运维在浏览器里确认 →
+// 轮询换到 access/refresh token）。本端点只生成链接与会话参数，不碰任何已有凭据。
+func (p *Panel) qwenworkDeviceStart(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.QwenworkDeviceStart == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "当前进程未启用千问办公授权"})
+		return
+	}
+	info, err := p.cfg.QwenworkDeviceStart()
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "生成授权链接失败：" + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+// qwenworkDevicePoll 处理 POST /panel/api/channels/qwenwork/device_poll。
+//
+// 请求体 {"nonce": "...", "verifier": "..."}；响应 {"pending": true} 或
+// {"pending": false, "account": {...}}。上游还在等确认时返回 pending，
+// 前端按 2 秒间隔轮询即可。
+func (p *Panel) qwenworkDevicePoll(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.QwenworkDevicePoll == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "当前进程未启用千问办公授权"})
+		return
+	}
+	var req struct {
+		Channel  string `json:"channel"`
+		Nonce    string `json:"nonce"`
+		Verifier string `json:"verifier"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if strings.TrimSpace(req.Nonce) == "" || strings.TrimSpace(req.Verifier) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "nonce / verifier 不能为空"})
+		return
+	}
+	// channel 非空 = 拿到令牌后立刻写进该渠道（面板自己落盘，前端不需要、
+	// 也不允许回传令牌）。空 = 只换令牌不落库（"先看看能不能授权"）。
+	res, err := p.cfg.QwenworkDevicePoll(strings.TrimSpace(req.Channel), req.Nonce, req.Verifier)
+	if err != nil {
+		// 轮询期的网络抖动很常见，用 200 + error 让前端继续轮询而不是弹红。
+		writeJSON(w, http.StatusOK, map[string]any{"pending": true, "error": err.Error()})
+		return
+	}
+	if res == nil {
+		res = map[string]any{"pending": true}
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// qwenworkModels 处理 POST /panel/api/channels/qwenwork/models。
+//
+// 请求体 {"channel": "<渠道名>"}：按渠道名取账号去拉上游模型目录（与外部渠道的
+// upstream_models 同口径——请求体里的地址/token 一律不采信）。
+func (p *Panel) qwenworkModels(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.QwenworkModels == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "当前进程未启用千问办公模型拉取"})
+		return
+	}
+	var req struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return
+	}
+	name := strings.TrimSpace(req.Channel)
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "channel 不能为空"})
+		return
+	}
+	models, err := p.cfg.QwenworkModels(name)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "拉取千问办公模型失败：" + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"channel": name, "models": models})
+}
+
+// qwenworkRemoveAccount 处理 POST /panel/api/channels/qwenwork/account_remove。
+//
+// 请求体 {"channel": "...", "index": N}：按序号删除一个已授权账号。序号来自 /status
+// 的 accounts[].index（面板只持有脱敏令牌，删除动作必须由服务端按序号完成）。
+func (p *Panel) qwenworkRemoveAccount(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.QwenworkRemoveAccount == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "当前进程未启用千问办公账号管理"})
+		return
+	}
+	var req struct {
+		Channel string `json:"channel"`
+		Index   int    `json:"index"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return
+	}
+	name := strings.TrimSpace(req.Channel)
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "channel 不能为空"})
+		return
+	}
+	left, err := p.cfg.QwenworkRemoveAccount(name, req.Index)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "channel": name, "left": left})
+}
