@@ -56,9 +56,10 @@ type qwenworkModelEntry struct {
 }
 
 var qwenworkModels = struct {
-	mu    sync.Mutex
-	items map[string]qwenworkModelEntry
-}{items: map[string]qwenworkModelEntry{}}
+	mu       sync.Mutex
+	items    map[string]qwenworkModelEntry
+	inflight map[string]bool
+}{items: map[string]qwenworkModelEntry{}, inflight: map[string]bool{}}
 
 // qwenworkState 运行期账号状态：轮询游标 + 刷新后的令牌（不写回配置，
 // 避免请求路径改配置文件；配置里的 refresh_token 才是权威凭据）。
@@ -72,19 +73,33 @@ var qwenworkState = struct {
 func QwenworkModelIDsCached(ch ChannelInfo) []string {
 	key := qwenworkCacheKey(ch)
 	qwenworkModels.mu.Lock()
-	defer qwenworkModels.mu.Unlock()
 	entry, ok := qwenworkModels.items[key]
+	stale := true
+	if ok {
+		ttl := QwenworkModelTTL
+		if entry.failed {
+			ttl = QwenworkModelFailTTL
+		}
+		stale = time.Since(entry.at) >= ttl
+	}
+	// 过期或缺失：交给后台补，本次先用旧值。千问的模型目录只有它自己的端点能拉，
+	// 不在读路径上补就会"5 分钟后渠道突然没有模型"（实测：部署后能跑，过一会儿全 404）。
+	if stale && len(ch.Accounts) > 0 && !qwenworkModels.inflight[key] {
+		qwenworkModels.inflight[key] = true
+		go func(in ChannelInfo) {
+			defer func() {
+				qwenworkModels.mu.Lock()
+				delete(qwenworkModels.inflight, key)
+				qwenworkModels.mu.Unlock()
+			}()
+			_, _ = FetchQwenworkModels(in, QwenworkModelTimeout)
+		}(ch)
+	}
+	qwenworkModels.mu.Unlock()
 	if !ok {
 		return nil
 	}
-	ttl := QwenworkModelTTL
-	if entry.failed {
-		ttl = QwenworkModelFailTTL
-	}
-	if time.Since(entry.at) >= ttl {
-		return nil
-	}
-	return entry.ids
+	return entry.ids // 陈旧的也比没有好：刷新期间别让渠道模型集闪空
 }
 
 // FetchQwenworkModels 同步拉取某渠道的模型目录（面板"拉模型"与后台预热用）。
